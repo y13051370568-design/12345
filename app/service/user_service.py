@@ -1,7 +1,10 @@
 from app.models.user import User
 
-def get_user_list(db, page, page_size, role=None, status=None):
+def get_user_list(db, page, page_size, role=None, status=None, username=None):
     query = db.query(User)
+
+    if username:
+        query = query.filter(User.username.like(f"%{username}%"))
 
     if role:
         query = query.filter(User.role == role)
