@@ -12,6 +12,7 @@ class User(Base):
     role = Column(String(20), nullable=False, default="ZERO_BASIS")
     api_token_limit = Column(Integer, default=1000000)
     api_token_used = Column(Integer, default=0)
+    api_token_warning_threshold = Column(Integer, default=800000)
 
     status = Column(Integer, default=1)
 
@@ -26,6 +27,9 @@ class UserOut(BaseModel):
     username: str
     role: str
     status: int
+    api_token_limit: int
+    api_token_used: int
+    api_token_warning_threshold: int
     created_at: datetime
 
     class Config:

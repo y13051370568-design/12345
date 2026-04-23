@@ -34,6 +34,7 @@ class UserOut(BaseModel):
     status: int
     api_token_limit: int
     api_token_used: int
+    api_token_warning_threshold: int
     created_at: datetime
 
     class Config:
@@ -48,11 +49,18 @@ class UserInfo(BaseModel):
     status: int
     api_token_limit: int
     api_token_used: int
+    api_token_warning_threshold: int
     permissions: list = []  # 权限列表
     created_at: datetime
 
     class Config:
         from_attributes = True
+
+
+class UserQuotaAdjust(BaseModel):
+    """用户额度调整请求"""
+    api_token_limit: Optional[int] = Field(None, ge=0, description="Token 额度上限")
+    api_token_warning_threshold: Optional[int] = Field(None, ge=0, description="预警阈值")
 
 
 class LoginResponse(BaseModel):

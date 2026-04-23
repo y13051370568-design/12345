@@ -21,6 +21,9 @@ from app.core.exceptions import (
 from app.api import user_api
 from app.api import auth_api
 from app.api import task_api
+from app.api import model_api
+from app.api import quota_api
+from app.api import dataset_api
 
 
 # 创建FastAPI应用实例
@@ -73,6 +76,9 @@ from app.api import auth_api
 app.include_router(auth_api.router, prefix="/api")
 app.include_router(user_api.router, prefix="/api", tags=["用户管理"])
 app.include_router(task_api.router, prefix="/api", tags=["任务中心"])
+app.include_router(model_api.router, prefix="/api", tags=["模型广场管理"])
+app.include_router(quota_api.router, prefix="/api", tags=["API 额度管理"])
+app.include_router(dataset_api.router, prefix="/api", tags=["数据中心审核与管理"])
 
 
 # 健康检查接口

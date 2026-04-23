@@ -8,6 +8,7 @@ from app.db import SessionLocal
 from app.core.config import settings
 from app.core.auth import get_current_user
 from app.core.logger import logger
+from app.service.quota_service import quota_service
 
 router = APIRouter(prefix="/tasks", tags=["任务中心"])
 
@@ -25,15 +26,22 @@ def get_db():
 @router.post("/upload")
 async def upload_csv(
     file: UploadFile = File(...),
-    current_user = Depends(get_current_user)
+    current_user = Depends(get_current_user),
+    db: Session = Depends(get_db)
 ):
     """
     上传CSV文件
 
     - **file**: CSV文件（最大100MB）
     """
+    # 1. 额度检查 (上传操作预扣或检查)
+    quota_check = quota_service.check_quota(db, current_user.id, required_tokens=100)  # 假设上传消耗100 tokens
+    if not quota_check["allowed"]:
+        raise HTTPException(status_code=402, detail=quota_check["message"])
+
     if not file.filename.endswith(".csv"):
         raise HTTPException(status_code=400, detail="仅支持CSV文件")
+
 
     if file.size and file.size > settings.MAX_UPLOAD_SIZE_MB * 1024 * 1024:
         raise HTTPException(status_code=400, detail=f"文件大小超过{settings.MAX_UPLOAD_SIZE_MB}MB限制")
@@ -56,9 +64,15 @@ async def upload_csv(
 
     logger.info(f"User {current_user.username} uploaded file: {file.filename}, {row_count} rows")
 
+    # 3. 额度消耗记录
+    consumption = quota_service.consume_quota(
+        db, current_user.id, tokens=100, action="file_upload", task_id=file_id
+    )
+
     return {
         "success": True,
         "message": "文件上传成功",
+        "warning": consumption["warning"],
         "data": {
             "file_id": file_id,
             "filename": file.filename,
