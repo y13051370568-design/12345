@@ -24,6 +24,7 @@ from app.api import task_api
 from app.api import model_api
 from app.api import quota_api
 from app.api import dataset_api
+from app.agent import api as agent_api
 
 
 # 创建FastAPI应用实例
@@ -79,6 +80,7 @@ app.include_router(task_api.router, prefix="/api", tags=["任务中心"])
 app.include_router(model_api.router, prefix="/api", tags=["模型广场管理"])
 app.include_router(quota_api.router, prefix="/api", tags=["API 额度管理"])
 app.include_router(dataset_api.router, prefix="/api", tags=["数据中心审核与管理"])
+app.include_router(agent_api.router, prefix="/api", tags=["Agent 工作流"])
 
 
 # 健康检查接口
