@@ -2,6 +2,15 @@
 CREATE DATABASE IF NOT EXISTS ai4ml_community DEFAULT CHARACTER SET utf8mb4 COLLATE utf8mb4_unicode_ci;
 USE ai4ml_community;
 
+-- 仅重建 Agent 工作流相关表，按外键依赖倒序删除。
+DROP TABLE IF EXISTS `community_comment`;
+DROP TABLE IF EXISTS `ml_task_review`;
+DROP TABLE IF EXISTS `ml_workflow`;
+DROP TABLE IF EXISTS `ml_model`;
+DROP TABLE IF EXISTS `ml_task`;
+DROP TABLE IF EXISTS `ml_dataset`;
+DROP TABLE IF EXISTS `sys_user`;
+
 -- 1. 用户表
 CREATE TABLE `sys_user` (
   `id` BIGINT NOT NULL AUTO_INCREMENT COMMENT '用户唯一标识',
@@ -10,6 +19,7 @@ CREATE TABLE `sys_user` (
   `role` VARCHAR(20) NOT NULL DEFAULT 'ZERO_BASIS' COMMENT '角色: ZERO_BASIS, DEVELOPER, ADMIN',
   `api_token_limit` INT NOT NULL DEFAULT 1000000 COMMENT 'API Token 额度上限',
   `api_token_used` INT NOT NULL DEFAULT 0 COMMENT '已使用的 API Token 数量',
+  `api_token_warning_threshold` INT NOT NULL DEFAULT 800000 COMMENT 'API Token 预警阈值',
   `status` TINYINT NOT NULL DEFAULT 1 COMMENT '账号状态: 1(启用), 0(禁用)',
   `created_at` DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP COMMENT '注册时间',
   `updated_at` DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP COMMENT '更新时间',
@@ -25,6 +35,8 @@ CREATE TABLE `ml_dataset` (
   `description` TEXT COMMENT '数据集描述',
   `file_path` VARCHAR(255) NOT NULL COMMENT '服务器存储路径',
   `file_size_kb` INT NOT NULL COMMENT '文件大小(KB)',
+  `row_count` INT DEFAULT NULL COMMENT 'CSV 行数',
+  `preview_json` JSON DEFAULT NULL COMMENT '数据预览信息',
   `is_public` TINYINT NOT NULL DEFAULT 0 COMMENT '是否公开: 0(私有), 1(公开)',
   `audit_status` VARCHAR(20) NOT NULL DEFAULT 'PENDING' COMMENT '审核状态: PENDING, APPROVED, REJECTED',
   `tags` VARCHAR(255) COMMENT '分类标签(逗号分隔)',
@@ -51,6 +63,8 @@ CREATE TABLE `ml_task` (
   `last_error_json` JSON DEFAULT NULL COMMENT '最近一次错误信息',
   `result_demo_url` VARCHAR(255) COMMENT 'Web Demo接口链接',
   `report_url` VARCHAR(255) COMMENT '模型分析报告链接',
+  `generated_code_path` VARCHAR(255) COMMENT 'Operation Agent 生成代码路径',
+  `model_artifact_path` VARCHAR(255) COMMENT '模型产物路径',
   `fail_reason` TEXT COMMENT '失败原因记录',
   `created_at` DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP COMMENT '创建时间',
   `updated_at` DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP COMMENT '更新时间',
