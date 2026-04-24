@@ -24,7 +24,7 @@ from app.api import task_api
 from app.api import model_api
 from app.api import quota_api
 from app.api import dataset_api
-from app.agent import api as agent_api
+from app.api import agent_api
 
 
 # 创建FastAPI应用实例

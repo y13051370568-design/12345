@@ -92,4 +92,3 @@ def make_task_zip(task_id: str, artifacts: Dict[str, Any]) -> Path:
             if artifact_path.exists() and artifact_path.is_file():
                 archive.write(artifact_path, arcname=f"{key}_{artifact_path.name}")
     return zip_path
-

@@ -4,12 +4,14 @@ from typing import Any, Dict, List, Optional
 from pydantic import BaseModel, Field
 
 
+# Agent 接口统一响应结构，保持与现有后端 success/message/data 风格一致。
 class ApiResponse(BaseModel):
     success: bool = True
     message: str = "操作成功"
     data: Any = None
 
 
+# 数据集预览结构，用于展示 CSV 列名、样例行、总行数和文件大小。
 class DatasetPreview(BaseModel):
     columns: List[str]
     rows: List[Dict[str, Any]]
@@ -30,6 +32,7 @@ class DatasetOut(BaseModel):
 
 
 class TaskCreate(BaseModel):
+    # 创建任务只引用已上传数据集，避免在建模接口中重复传输大文件。
     dataset_id: int = Field(..., description="已上传的数据集 ID")
     task_description: str = Field(..., min_length=3, description="自然语言建模需求")
     hitl: Optional[List[str]] = Field(
@@ -40,10 +43,12 @@ class TaskCreate(BaseModel):
 
 
 class TaskRunRequest(BaseModel):
+    # offline=True 时使用离线规则 LLM，适合测试环境和无 API Key 环境。
     offline: bool = Field(True, description="是否使用离线规则 LLM，测试和无 Key 环境建议为 true")
 
 
 class ReviewSubmit(BaseModel):
+    # 审核动作直接映射原型工作流的 approve/edit_and_continue/reject。
     action: str = Field(..., description="approve、edit_and_continue 或 reject")
     patch: Optional[Dict[str, Any]] = Field(None, description="edit_and_continue 时提交的补丁")
     comment: str = ""
@@ -52,6 +57,7 @@ class ReviewSubmit(BaseModel):
 
 
 class TaskSummary(BaseModel):
+    # 任务列表只返回前端任务中心需要的摘要字段。
     id: int
     task_id: str
     dataset_id: int
@@ -72,6 +78,7 @@ class TaskSummary(BaseModel):
 
 
 class TaskDetail(TaskSummary):
+    # 详情额外返回完整状态、待审核内容、错误信息和产物索引。
     state: Optional[Dict[str, Any]] = None
     pending_review: Optional[Dict[str, Any]] = None
     last_error: Optional[Dict[str, Any]] = None
@@ -79,6 +86,7 @@ class TaskDetail(TaskSummary):
 
 
 class ReviewOut(BaseModel):
+    # 审核历史用于展示人工干预轨迹和版本变化。
     id: int
     review_stage: str
     action: str
@@ -90,6 +98,7 @@ class ReviewOut(BaseModel):
 
 
 class WorkflowShare(BaseModel):
+    # 分享工作流时只提交展示信息，核心工作流内容从任务状态中提取。
     task_id: str
     title: str = Field(..., min_length=1, max_length=100)
     description: Optional[str] = None
@@ -98,10 +107,12 @@ class WorkflowShare(BaseModel):
 
 
 class PredictRequest(BaseModel):
+    # 预测输入为单条样本，键必须与训练数据特征列保持一致。
     features: Dict[str, Any] = Field(..., description="单条预测输入，键为特征列名")
 
 
 class WorkflowOut(BaseModel):
+    # 工作流列表返回可复用、可 Fork 的元信息。
     id: int
     task_id: int
     title: str

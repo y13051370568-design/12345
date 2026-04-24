@@ -5,10 +5,10 @@ from typing import Any, Dict, List, Optional
 from fastapi import UploadFile
 from sqlalchemy.orm import Session
 
-from app.agent.models import AgentDataset, AgentTask, AgentTaskReview, AgentWorkflow
-from app.agent.runner_bridge import build_runner_for_user, parse_hitl_config
-from app.agent.storage import make_task_zip, read_json_artifact, read_text_artifact, save_csv_upload
 from app.core.exceptions import AuthorizationException, DataValidationException, ResourceNotFoundException
+from app.models.agent import AgentDataset, AgentTask, AgentTaskReview, AgentWorkflow
+from app.service.agent_runner_bridge import build_runner_for_user, parse_hitl_config
+from app.service.agent_storage import make_task_zip, read_json_artifact, read_text_artifact, save_csv_upload
 
 
 class AgentService:

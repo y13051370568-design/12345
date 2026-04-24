@@ -2,12 +2,13 @@ from fastapi import APIRouter, Depends, File, Query, UploadFile
 from fastapi.responses import FileResponse
 from sqlalchemy.orm import Session
 
-from app.agent.schemas import ApiResponse, PredictRequest, ReviewSubmit, TaskCreate, TaskRunRequest, WorkflowShare
-from app.agent.service import agent_service
 from app.core.auth import get_current_user
 from app.db import get_db_session
+from app.schemas.agent import ApiResponse, PredictRequest, ReviewSubmit, TaskCreate, TaskRunRequest, WorkflowShare
+from app.service.agent_service import agent_service
 
 
+# Agent 模块统一挂载在 /api/agent 下，避免与现有任务中心、数据中心接口混淆。
 router = APIRouter(prefix="/agent", tags=["Agent 工作流"])
 
 
@@ -39,7 +40,7 @@ def get_dataset_preview(
     db: Session = Depends(get_db_session),
     current_user=Depends(get_current_user),
 ):
-    from app.agent.models import AgentDataset
+    from app.models.agent import AgentDataset
 
     record = db.query(AgentDataset).filter(AgentDataset.id == dataset_id).first()
     if not record:

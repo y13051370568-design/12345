@@ -9,7 +9,7 @@ from app.core.config import settings
 
 
 def find_project_root() -> Path:
-    # 从 backend/base/app/agent 向上查找项目根目录，避免硬编码中文绝对路径。
+    # 从当前服务文件向上查找项目根目录，避免硬编码中文绝对路径。
     current = Path(__file__).resolve()
     for parent in current.parents:
         if (parent / "Agent工作流设计草案_含插图" / "demo.py").exists():
