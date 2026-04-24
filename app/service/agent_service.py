@@ -7,8 +7,8 @@ from sqlalchemy.orm import Session
 
 from app.core.exceptions import AuthorizationException, DataValidationException, ResourceNotFoundException
 from app.models.agent import AgentDataset, AgentTask, AgentTaskReview, AgentWorkflow
-from app.service.agent_runner_bridge import build_runner_for_user, parse_hitl_config
 from app.service.agent_storage import make_task_zip, read_json_artifact, read_text_artifact, save_csv_upload
+from app.service.agent_workflow_engine import AgentWorkflowEngine, parse_hitl_config
 
 
 class AgentService:
@@ -39,18 +39,12 @@ class AgentService:
             raise ResourceNotFoundException("数据集不存在")
         self._assert_owner_or_admin(dataset.user_id, current_user)
 
-        runner, _ = build_runner_for_user(
-            offline=True,
-            task_owner_username=current_user.username,
-            reviewer_username=current_user.username,
-        )
-        state = runner.create_task(
+        engine = AgentWorkflowEngine(db, current_user, offline=True)
+        state = engine.create_task(
+            dataset=dataset,
             user_request=payload.task_description,
-            csv_path=dataset.file_path,
             hitl_config=parse_hitl_config(payload.hitl),
         )
-        # runner 内部使用独立 PyMySQL 连接写库；结束当前事务后才能看到新任务。
-        db.rollback()
         task = self.get_task_by_public_id(db, state.task_id, current_user)
         if payload.source_workflow_id:
             task.source_workflow_id = payload.source_workflow_id
@@ -82,25 +76,13 @@ class AgentService:
     def run_task(self, db: Session, task_id: str, current_user: Any, offline: bool = True) -> AgentTask:
         # 执行可能在任意节点暂停、完成或失败，最终状态统一从数据库重新读取。
         task = self.get_task_by_public_id(db, task_id, current_user)
-        runner, _ = build_runner_for_user(
-            offline=offline,
-            task_owner_username=current_user.username,
-            reviewer_username=current_user.username,
-        )
-        runner.run_task(task_id)
-        db.rollback()
+        AgentWorkflowEngine(db, current_user, offline=offline).run_task(task)
         return self.get_task_by_public_id(db, task_id, current_user)
 
     def resume_task(self, db: Session, task_id: str, current_user: Any, offline: bool = True) -> AgentTask:
-        # 恢复执行只允许 READY_TO_RESUME 状态，具体状态校验由 GraphRunner 保持一致。
-        self.get_task_by_public_id(db, task_id, current_user)
-        runner, _ = build_runner_for_user(
-            offline=offline,
-            task_owner_username=current_user.username,
-            reviewer_username=current_user.username,
-        )
-        runner.resume_task(task_id)
-        db.rollback()
+        # 恢复执行只允许 READY_TO_RESUME 状态，具体状态校验由内置工作流引擎保持一致。
+        task = self.get_task_by_public_id(db, task_id, current_user)
+        AgentWorkflowEngine(db, current_user, offline=offline).resume_task(task)
         return self.get_task_by_public_id(db, task_id, current_user)
 
     def cancel_task(self, db: Session, task_id: str, current_user: Any) -> AgentTask:
@@ -123,21 +105,12 @@ class AgentService:
         # HITL 干预是开发者能力，零基础用户只能查看任务状态和结果。
         if current_user.role not in {"DEVELOPER", "ADMIN"}:
             raise AuthorizationException("只有开发者或管理员可以进行人机协同审核")
-        self.get_task_by_public_id(db, task_id, current_user)
-        runner, _ = build_runner_for_user(
-            offline=payload.offline,
-            task_owner_username=current_user.username,
-            reviewer_username=current_user.username,
-        )
-        runner.submit_review(
-            task_id=task_id,
-            action=payload.action,
-            patch=payload.patch,
-            comment=payload.comment,
-        )
+        task = self.get_task_by_public_id(db, task_id, current_user)
+        engine = AgentWorkflowEngine(db, current_user, offline=payload.offline)
+        engine.submit_review(task, payload.action, payload.patch, payload.comment)
         if payload.auto_resume and payload.action in {"approve", "edit_and_continue"}:
-            runner.resume_task(task_id)
-        db.rollback()
+            task = self.get_task_by_public_id(db, task_id, current_user)
+            AgentWorkflowEngine(db, current_user, offline=payload.offline).resume_task(task)
         return self.get_task_by_public_id(db, task_id, current_user)
 
     def get_reviews(self, db: Session, task_id: str, current_user: Any) -> List[AgentTaskReview]:
@@ -306,7 +279,7 @@ class AgentService:
             raise AuthorizationException("只能访问自己的 Agent 资源")
 
     def _artifacts(self, task: AgentTask) -> Dict[str, Any]:
-        # artifacts 是原型工作流产物的统一索引，例如代码、报告、Demo URL。
+        # artifacts 是后端内置工作流产物的统一索引，例如代码、报告、Demo URL。
         state = task.state_json or {}
         artifacts = state.get("artifacts") if isinstance(state, dict) else {}
         return artifacts or {}

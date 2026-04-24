@@ -32,6 +32,12 @@ class Settings(BaseSettings):
     MAX_UPLOAD_SIZE_MB: int = 100
     MAX_ROWS_PER_CSV: int = 100000
 
+    # Agent 大模型配置；默认读取后端目录内部的本地密钥文件。
+    AGENT_LLM_BASE_URL: str = "https://api.deepseek.com/v1"
+    AGENT_LLM_MODEL: str = "deepseek-chat"
+    AGENT_LLM_API_KEY_FILE: str = "config/api_key.txt"
+    AGENT_LLM_TIMEOUT_SECONDS: int = 60
+
     # 日志配置
     LOG_LEVEL: str = "INFO"
     LOG_FILE: str = "logs/app.log"

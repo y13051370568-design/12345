@@ -32,6 +32,7 @@ env/
 .env
 .env.local
 .env.*.local
+config/api_key.txt
 
 # 日志文件
 logs/
