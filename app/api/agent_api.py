@@ -95,8 +95,8 @@ def list_tasks(
     查询当前用户可见的 Agent 建模任务列表。
 
     - **status**: 可选任务状态过滤条件。
-    - 普通用户和开发者只能查看自己的任务。
-    - 管理员可以查看全部任务。
+    - 只返回当前登录用户本人创建的任务。
+    - 管理员如需查看全量任务，应使用 `/api/agent/admin/tasks`。
     - 返回任务状态、当前节点、版本、产物索引等摘要信息。
     """
     tasks = agent_service.list_tasks(db, current_user, status=status)

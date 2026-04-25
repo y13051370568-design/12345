@@ -53,10 +53,12 @@ class AgentService:
         return task
 
     def list_tasks(self, db: Session, current_user: Any, status: Optional[str] = None) -> List[AgentTask]:
-        # 管理员可看全部任务，普通用户和开发者只能看自己的任务。
-        query = db.query(AgentTask).order_by(AgentTask.created_at.desc())
-        if current_user.role != "ADMIN":
-            query = query.filter(AgentTask.user_id == current_user.id)
+        # 普通任务列表始终只返回当前登录用户本人任务；管理员全量查看走 admin_list_tasks。
+        query = (
+            db.query(AgentTask)
+            .filter(AgentTask.user_id == current_user.id)
+            .order_by(AgentTask.created_at.desc())
+        )
         if status:
             query = query.filter(AgentTask.status == status)
         return query.all()
