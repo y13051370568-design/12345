@@ -60,9 +60,11 @@ class WorkflowResult:
 
 
 def parse_hitl_config(stages: list[str] | None) -> Dict[str, bool]:
-    # None、空列表或 all 表示全部审核节点启用；否则只启用传入的节点。
-    if not stages or "all" in stages:
+    # None 或 all 表示全部审核节点启用；空列表或 none/off 表示关闭人工审核。
+    if stages is None or "all" in stages:
         return dict(DEFAULT_HITL_CONFIG)
+    if not stages or any(stage in {"none", "off", "false"} for stage in stages):
+        return {key: False for key in DEFAULT_HITL_CONFIG}
     enabled = set(stages)
     return {key: key in enabled for key in DEFAULT_HITL_CONFIG}
 

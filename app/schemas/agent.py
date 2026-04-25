@@ -37,7 +37,7 @@ class TaskCreate(BaseModel):
     task_description: str = Field(..., min_length=3, description="自然语言建模需求")
     hitl: Optional[List[str]] = Field(
         default=None,
-        description="启用的人工审核节点；传 all 或留空时默认开启全部节点",
+        description="启用的人工审核节点；留空或传 all 默认开启全部节点；传空列表或 none 表示关闭人工审核",
     )
     source_workflow_id: Optional[int] = Field(None, description="Fork 后复用的工作流 ID")
 

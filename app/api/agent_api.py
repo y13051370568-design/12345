@@ -78,7 +78,7 @@ def create_task(
 
     - **dataset_id**: 已上传数据集 ID。
     - **task_description**: 用户自然语言建模需求。
-    - **hitl**: 可选人工审核节点列表，传 `all` 或留空表示启用全部审核节点。
+    - **hitl**: 可选人工审核节点列表，传 `all` 或留空表示启用全部审核节点；传空列表或 `none` 表示关闭人工审核。
     - 创建后任务状态为 `CREATED`，需要调用运行接口才会开始执行工作流。
     """
     task = agent_service.create_task(db, payload, current_user)
