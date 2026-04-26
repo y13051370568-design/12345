@@ -146,6 +146,46 @@ class ModelService:
         return model
 
     @staticmethod
+    def update_model_admin(db: Session, model_id: int, model_in: ModelUpdate) -> AIModel:
+        """管理员更新模型信息（如修改分类、标签）"""
+        model = ModelService.get_model_by_id(db, model_id)
+        if not model:
+            raise BusinessException("模型不存在")
+        
+        update_data = model_in.model_dump(exclude_unset=True)
+        for field, value in update_data.items():
+            setattr(model, field, value)
+            
+        db.commit()
+        db.refresh(model)
+        logger.info(f"Admin updated model {model_id}")
+        return model
+
+    @staticmethod
+    def republish_model(db: Session, model_id: int, admin_id: int) -> AIModel:
+        """重新上架模型"""
+        model = ModelService.get_model_by_id(db, model_id)
+        if not model:
+            raise BusinessException("模型不存在")
+            
+        old_status = model.status
+        model.status = 1  # Approved/Public
+        
+        audit_log = AuditLog(
+            resource_type="model",
+            resource_id=model_id,
+            admin_id=admin_id,
+            old_status=old_status,
+            new_status=1,
+            action="re-publish"
+        )
+        db.add(audit_log)
+        db.commit()
+        db.refresh(model)
+        logger.info(f"Admin {admin_id} re-published model {model_id}")
+        return model
+
+    @staticmethod
     def get_audit_logs(db: Session, model_id: int) -> List[AuditLog]:
         """获取审核记录"""
         return db.query(AuditLog).filter(

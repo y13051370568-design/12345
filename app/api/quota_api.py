@@ -49,3 +49,17 @@ def list_quota_logs(
         "total": total,
         "items": [QuotaLogOut.from_attributes(log) for log in logs]
     }
+
+@router.get("/admin/users")
+def list_user_quotas(
+    page: int = Query(1, ge=1),
+    page_size: int = Query(20, ge=1, le=100),
+    db: Session = Depends(get_db_session),
+    admin: User = Depends(admin_required)
+):
+    """管理员获取所有用户的额度状态列表"""
+    total, users = quota_service.get_all_user_quotas(db, page, page_size)
+    return {
+        "total": total,
+        "items": [UserOut.from_attributes(user) for user in users]
+    }

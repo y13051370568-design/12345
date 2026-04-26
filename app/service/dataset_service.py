@@ -124,6 +124,22 @@ class DatasetService:
         return dataset
 
     @staticmethod
+    def update_dataset_admin(db: Session, dataset_id: int, dataset_in: DatasetUpdate) -> Dataset:
+        """管理员更新数据集信息（如修改分类、标签）"""
+        dataset = DatasetService.get_dataset_by_id(db, dataset_id)
+        if not dataset:
+            raise BusinessException("数据集不存在")
+        
+        update_data = dataset_in.model_dump(exclude_unset=True)
+        for field, value in update_data.items():
+            setattr(dataset, field, value)
+            
+        db.commit()
+        db.refresh(dataset)
+        logger.info(f"Admin updated dataset {dataset_id}")
+        return dataset
+
+    @staticmethod
     def get_audit_logs(db: Session, dataset_id: int) -> List[AuditLog]:
         """获取审核记录"""
         return db.query(AuditLog).filter(

@@ -126,5 +126,17 @@ class QuotaService:
         
         return total, logs
 
+    @staticmethod
+    def get_all_user_quotas(
+        db: Session,
+        page: int = 1,
+        page_size: int = 20
+    ) -> Tuple[int, List[User]]:
+        """管理员获取所有用户的额度状态"""
+        query = db.query(User)
+        total = query.count()
+        users = query.offset((page - 1) * page_size).limit(page_size).all()
+        return total, users
+
 # 全局实例
 quota_service = QuotaService()

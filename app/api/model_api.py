@@ -86,6 +86,25 @@ def take_down_model(
     """管理员下架模型"""
     return model_service.take_down_model(db, model_id, admin.id, reason)
 
+@router.put("/{model_id}/admin", response_model=ModelOut)
+def update_model_admin(
+    model_id: int,
+    model_in: ModelUpdate,
+    db: Session = Depends(get_db_session),
+    admin: User = Depends(admin_required)
+):
+    """管理员修改模型信息 (分类、标签等)"""
+    return model_service.update_model_admin(db, model_id, model_in)
+
+@router.post("/{model_id}/publish", response_model=ModelOut)
+def republish_model(
+    model_id: int,
+    db: Session = Depends(get_db_session),
+    admin: User = Depends(admin_required)
+):
+    """管理员重新上架模型"""
+    return model_service.republish_model(db, model_id, admin.id)
+
 @router.get("/{model_id}/audit-logs", response_model=List[AuditLogOut])
 def get_audit_logs(
     model_id: int,

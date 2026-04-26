@@ -77,6 +77,16 @@ def take_down_dataset(
     """管理员下架数据集"""
     return dataset_service.take_down_dataset(db, dataset_id, admin.id, reason)
 
+@router.put("/{dataset_id}", response_model=DatasetOut)
+def update_dataset_admin(
+    dataset_id: int,
+    dataset_in: DatasetUpdate,
+    db: Session = Depends(get_db_session),
+    admin: User = Depends(admin_required)
+):
+    """管理员修改数据集信息 (分类、标签等)"""
+    return dataset_service.update_dataset_admin(db, dataset_id, dataset_in)
+
 @router.get("/{dataset_id}/audit-logs", response_model=List[AuditLogOut])
 def get_audit_logs(
     dataset_id: int,
