@@ -145,11 +145,14 @@ class AgentService:
             raise ResourceNotFoundException("任务尚未生成代码")
         return {"path": code_path, "python_code": read_text_artifact(code_path)}
 
-    def predict(self, db: Session, task_id: str, features: Dict[str, Any], current_user: Any) -> Dict[str, Any]:
-        # 轻量级 Web Demo 实现：执行生成代码中的 train()，再用提交的单条特征做预测。
+    def predict(self, db: Session, task_id: str, features: List[Dict[str, Any]], current_user: Any) -> Dict[str, Any]:
+        # 轻量级 Web Demo 实现：执行生成代码中的 train()，再用提交的多条特征做批量预测。
         task = self.get_task_by_public_id(db, task_id, current_user)
         if task.status != "COMPLETED":
             raise DataValidationException("任务尚未完成，不能进行预测")
+        rows = features
+        if any(not row for row in rows):
+            raise DataValidationException("预测输入数组中的每一行都必须是非空样本对象")
         code_info = self.get_code(db, task_id, current_user if current_user.role in {"DEVELOPER", "ADMIN"} else self._as_developer(current_user))
         namespace: Dict[str, Any] = {}
         exec(code_info["python_code"], namespace)
@@ -159,13 +162,19 @@ class AgentService:
         model, _, _ = train_func()
         import pandas as pd
 
-        frame = pd.DataFrame([features])
+        frame = pd.DataFrame(rows)
         prediction = model.predict(frame)
         values = prediction.tolist() if hasattr(prediction, "tolist") else list(prediction)
+        records = [
+            {"index": index, "input": row, "prediction": values[index]}
+            for index, row in enumerate(rows)
+        ]
         return {
             "task_id": task_id,
-            "prediction": values[0] if len(values) == 1 else values,
+            "prediction": values,
             "input": features,
+            "predictions": records,
+            "count": len(records),
         }
 
     def make_download(self, db: Session, task_id: str, current_user: Any):

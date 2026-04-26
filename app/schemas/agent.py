@@ -107,8 +107,12 @@ class WorkflowShare(BaseModel):
 
 
 class PredictRequest(BaseModel):
-    # 预测输入为单条样本，键必须与训练数据特征列保持一致。
-    features: Dict[str, Any] = Field(..., description="单条预测输入，键为特征列名")
+    # 预测输入为样本数组，用于前端表格化批量预测。
+    features: List[Dict[str, Any]] = Field(
+        ...,
+        min_length=1,
+        description="批量预测输入，数组元素为样本对象，键为特征列名",
+    )
 
 
 class WorkflowOut(BaseModel):
