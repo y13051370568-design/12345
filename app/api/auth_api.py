@@ -114,6 +114,7 @@ def get_current_user_info(
         status=current_user.status,
         api_token_limit=current_user.api_token_limit,
         api_token_used=current_user.api_token_used,
+        api_token_warning_threshold=current_user.api_token_warning_threshold,
         permissions=permissions,
         created_at=current_user.created_at
     )
