@@ -2,13 +2,17 @@
 CREATE DATABASE IF NOT EXISTS ai4ml_community DEFAULT CHARACTER SET utf8mb4 COLLATE utf8mb4_unicode_ci;
 USE ai4ml_community;
 
--- 仅重建 Agent 工作流相关表，按外键依赖倒序删除。
+-- 按外键依赖倒序删除，避免重复初始化时约束冲突。
 DROP TABLE IF EXISTS `community_comment`;
 DROP TABLE IF EXISTS `ml_task_review`;
 DROP TABLE IF EXISTS `ml_workflow`;
 DROP TABLE IF EXISTS `ml_model`;
 DROP TABLE IF EXISTS `ml_task`;
 DROP TABLE IF EXISTS `ml_dataset`;
+DROP TABLE IF EXISTS `audit_logs`;
+DROP TABLE IF EXISTS `quota_logs`;
+DROP TABLE IF EXISTS `ai_models`;
+DROP TABLE IF EXISTS `ml_datasets`;
 DROP TABLE IF EXISTS `sys_user`;
 
 -- 1. 用户表
@@ -151,3 +155,78 @@ CREATE TABLE `ml_task_review` (
   CONSTRAINT `fk_task_review_task` FOREIGN KEY (`task_id`) REFERENCES `ml_task` (`id`) ON DELETE CASCADE,
   CONSTRAINT `fk_task_review_user` FOREIGN KEY (`operator_user_id`) REFERENCES `sys_user` (`id`) ON DELETE CASCADE
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_0900_ai_ci COMMENT='人机协同审核记录表';
+
+-- 8. 427 新增：数据中心审核表，供 app.models.dataset.Dataset 使用。
+CREATE TABLE `ml_datasets` (
+  `id` BIGINT NOT NULL AUTO_INCREMENT,
+  `user_id` BIGINT NOT NULL,
+  `name` VARCHAR(100) NOT NULL,
+  `description` TEXT,
+  `category` VARCHAR(50) DEFAULT NULL,
+  `tags` VARCHAR(255) DEFAULT NULL,
+  `status` INT DEFAULT 0 COMMENT '0待审, 1通过, 2驳回, 3下架, 4需补充',
+  `is_public` TINYINT(1) DEFAULT 0,
+  `rejection_reason` VARCHAR(255) DEFAULT NULL,
+  `file_url` VARCHAR(255) DEFAULT NULL,
+  `file_size` BIGINT DEFAULT NULL,
+  `row_count` INT DEFAULT NULL,
+  `created_at` DATETIME DEFAULT CURRENT_TIMESTAMP,
+  `updated_at` DATETIME DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
+  PRIMARY KEY (`id`),
+  KEY `ix_ml_datasets_id` (`id`),
+  KEY `idx_ml_datasets_user` (`user_id`),
+  CONSTRAINT `fk_ml_datasets_user` FOREIGN KEY (`user_id`) REFERENCES `sys_user` (`id`) ON DELETE CASCADE
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COMMENT='427 数据中心资源表';
+
+-- 9. 427 新增：AI 模型资源表，供 app.models.ai_model.AIModel 使用。
+CREATE TABLE `ai_models` (
+  `id` BIGINT NOT NULL AUTO_INCREMENT,
+  `user_id` BIGINT NOT NULL,
+  `name` VARCHAR(100) NOT NULL,
+  `description` TEXT,
+  `category` VARCHAR(50) DEFAULT NULL,
+  `tags` VARCHAR(255) DEFAULT NULL,
+  `status` INT DEFAULT 0 COMMENT '0待审, 1通过, 2驳回, 3下架, 4需补充',
+  `is_public` TINYINT(1) DEFAULT 0,
+  `is_recommended` TINYINT(1) DEFAULT 0,
+  `rejection_reason` VARCHAR(255) DEFAULT NULL,
+  `resource_url` VARCHAR(255) DEFAULT NULL,
+  `created_at` DATETIME DEFAULT CURRENT_TIMESTAMP,
+  `updated_at` DATETIME DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
+  PRIMARY KEY (`id`),
+  KEY `ix_ai_models_id` (`id`),
+  KEY `idx_ai_models_user` (`user_id`),
+  CONSTRAINT `fk_ai_models_user` FOREIGN KEY (`user_id`) REFERENCES `sys_user` (`id`) ON DELETE CASCADE
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COMMENT='427 AI 模型资源表';
+
+-- 10. 427 新增：审核日志表，供数据集和模型审核接口使用。
+CREATE TABLE `audit_logs` (
+  `id` BIGINT NOT NULL AUTO_INCREMENT,
+  `resource_type` VARCHAR(20) NOT NULL,
+  `resource_id` BIGINT NOT NULL,
+  `admin_id` BIGINT NOT NULL,
+  `old_status` INT DEFAULT NULL,
+  `new_status` INT DEFAULT NULL,
+  `action` VARCHAR(50) DEFAULT NULL,
+  `reason` VARCHAR(255) DEFAULT NULL,
+  `created_at` DATETIME DEFAULT CURRENT_TIMESTAMP,
+  PRIMARY KEY (`id`),
+  KEY `ix_audit_logs_id` (`id`),
+  KEY `idx_audit_logs_admin` (`admin_id`),
+  KEY `idx_audit_logs_resource` (`resource_type`, `resource_id`),
+  CONSTRAINT `fk_audit_logs_admin` FOREIGN KEY (`admin_id`) REFERENCES `sys_user` (`id`) ON DELETE CASCADE
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COMMENT='427 审核日志表';
+
+-- 11. 427 新增：API Token 消耗日志表，供额度管理接口使用。
+CREATE TABLE `quota_logs` (
+  `id` BIGINT NOT NULL AUTO_INCREMENT,
+  `user_id` BIGINT NOT NULL,
+  `tokens_consumed` INT NOT NULL,
+  `action` VARCHAR(50) DEFAULT NULL,
+  `task_id` VARCHAR(50) DEFAULT NULL,
+  `created_at` DATETIME DEFAULT CURRENT_TIMESTAMP,
+  PRIMARY KEY (`id`),
+  KEY `ix_quota_logs_id` (`id`),
+  KEY `idx_quota_logs_user` (`user_id`),
+  CONSTRAINT `fk_quota_logs_user` FOREIGN KEY (`user_id`) REFERENCES `sys_user` (`id`) ON DELETE CASCADE
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COMMENT='427 API Token 消耗日志表';

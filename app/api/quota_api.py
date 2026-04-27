@@ -47,7 +47,7 @@ def list_quota_logs(
     total, logs = quota_service.get_quota_logs(db, user_id, page, page_size)
     return {
         "total": total,
-        "items": [QuotaLogOut.from_attributes(log) for log in logs]
+        "items": [QuotaLogOut.model_validate(log, from_attributes=True) for log in logs]
     }
 
 @router.get("/admin/users")
@@ -61,5 +61,5 @@ def list_user_quotas(
     total, users = quota_service.get_all_user_quotas(db, page, page_size)
     return {
         "total": total,
-        "items": [UserOut.from_attributes(user) for user in users]
+        "items": [UserOut.model_validate(user, from_attributes=True) for user in users]
     }

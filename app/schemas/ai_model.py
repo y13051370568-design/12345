@@ -42,7 +42,8 @@ class ModelOut(AIModelBase):
 
 class AuditLogOut(BaseModel):
     id: int
-    model_id: int
+    resource_type: str
+    resource_id: int
     admin_id: int
     old_status: Optional[int]
     new_status: int
