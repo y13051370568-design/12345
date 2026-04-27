@@ -327,7 +327,7 @@ def get_demo(
     获取任务对应的轻量预测 Demo 地址。
 
     - 当前返回后端预测接口地址。
-    - 前端可使用该地址构造单条样本预测页面。
+    - 前端可使用该地址构造批量预测页面。
     - 任务完成后通常可用。
     """
     task = agent_service.get_task_by_public_id(db, task_id, current_user)
@@ -342,11 +342,11 @@ def predict(
     current_user=Depends(get_current_user),
 ):
     """
-    使用 Agent 生成的训练代码对单条样本进行预测。
+    使用 Agent 生成的训练代码对一组样本进行批量预测。
 
     - 任务必须已经 `COMPLETED`。
-    - **features** 为单条样本特征字典，键应与训练特征列一致。
-    - 返回预测结果和原始输入。
+    - **features** 为样本特征字典数组，键应与训练特征列一致。
+    - 返回预测结果、原始输入和逐行预测记录。
     """
     return ApiResponse(data=agent_service.predict(db, task_id, payload.features, current_user))
 

@@ -4,6 +4,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Dict, List
 import json
+import math
 import re
 import uuid
 
@@ -297,20 +298,54 @@ CSV 列名：
         self._record_node_output(task, "data_analysis", output)
 
     def _model_plan(self, task: AgentTask) -> None:
-        # 依据任务类型选择一个稳健的 sklearn 基线模型。
-        model_name = "RandomForestClassifier" if task.task_type == "CLASSIFICATION" else "RandomForestRegressor"
-        metric = "accuracy" if task.task_type == "CLASSIFICATION" else "r2_score"
-        output = {
-            "framework": "sklearn",
-            "model_name": model_name,
-            "metric": metric,
-            "train_test_split": 0.2,
-            "preprocess": "数值特征直接填充中位数，类别特征做 OneHot 编码",
-        }
+        # 规划候选模型、评估指标和切分策略；真实 LLM 模式下由 Model Agent 给出结构化计划。
+        state = self._state(task)
+        data_analysis = state.get("context", {}).get("node_outputs", {}).get("data_analysis", {})
+        row_count = int(data_analysis.get("row_count") or 0)
+        allowed_models = self._allowed_models(task.task_type or "REGRESSION")
+        default_metric = "accuracy" if task.task_type == "CLASSIFICATION" else "r2_score"
+        if self.llm_client:
+            plan = self.llm_client.chat_json(
+                system_prompt="你是 AI4ML 平台的 Model Agent。请根据任务类型和数据概况规划可执行的 sklearn 表格建模方案，只返回 JSON。",
+                user_prompt=f"""
+任务解析：
+{json.dumps(state.get("context", {}).get("node_outputs", {}).get("manager_parse", {}), ensure_ascii=False, indent=2)}
+
+数据分析：
+{json.dumps(data_analysis, ensure_ascii=False, indent=2)}
+
+可选模型只能从以下列表选择：
+{json.dumps(allowed_models, ensure_ascii=False)}
+
+请返回严格 JSON：
+{{
+  "framework": "sklearn",
+  "candidate_models": ["从可选模型中选择 1 到 3 个"],
+  "primary_metric": "CLASSIFICATION 只能是 accuracy 或 f1；REGRESSION 只能是 r2_score、r2 或 rmse",
+  "train_test_split": 0.2,
+  "random_state": 42,
+  "use_stratify": true,
+  "preprocess": "一句话说明预处理策略",
+  "reason": "一句话说明为什么这样规划"
+}}
+""".strip(),
+            )
+        else:
+            plan = {
+                "framework": "sklearn",
+                "candidate_models": allowed_models,
+                "primary_metric": default_metric,
+                "train_test_split": 0.2 if row_count >= 10 else 0.25,
+                "random_state": 42,
+                "use_stratify": task.task_type == "CLASSIFICATION",
+                "preprocess": "数值特征填充中位数并标准化，类别特征填充众数并做 OneHot 编码",
+                "reason": "根据任务类型选择轻量可解释基线模型和随机森林模型进行对比。",
+            }
+        output = self._normalize_model_plan(plan, task.task_type or "REGRESSION", allowed_models)
         self._record_node_output(task, "model_plan", output)
 
     def _model_training(self, task: AgentTask) -> None:
-        # 执行一次轻量训练评估，只记录指标，不持久化 pickle，避免不安全反序列化。
+        # 训练多个候选模型并选择最佳结果，只记录可审计摘要，不持久化 pickle。
         state = self._state(task)
         frame = self._load_frame(state)
         target = task.target_column
@@ -320,41 +355,100 @@ CSV 列名：
         from sklearn.compose import ColumnTransformer
         from sklearn.ensemble import RandomForestClassifier, RandomForestRegressor
         from sklearn.impute import SimpleImputer
-        from sklearn.metrics import accuracy_score, r2_score
+        from sklearn.linear_model import LinearRegression, LogisticRegression
         from sklearn.model_selection import train_test_split
         from sklearn.pipeline import Pipeline
-        from sklearn.preprocessing import OneHotEncoder
+        from sklearn.preprocessing import OneHotEncoder, StandardScaler
 
-        features = [column for column in frame.columns if column != target]
+        plan = self._effective_model_plan(task)
+        features = [column for column in (task.feature_columns_json or []) if column in frame.columns and column != target]
+        if not features:
+            features = [column for column in frame.columns if column != target]
         x = frame[features]
         y = frame[target]
         numeric_features = list(x.select_dtypes(include="number").columns)
         categorical_features = [column for column in features if column not in numeric_features]
         preprocess = ColumnTransformer(
             transformers=[
-                ("num", SimpleImputer(strategy="median"), numeric_features),
+                ("num", Pipeline([("imputer", SimpleImputer(strategy="median")), ("scaler", StandardScaler())]), numeric_features),
                 ("cat", Pipeline([("imputer", SimpleImputer(strategy="most_frequent")), ("onehot", OneHotEncoder(handle_unknown="ignore"))]), categorical_features),
             ]
         )
-        model = RandomForestClassifier(n_estimators=30, random_state=42) if task.task_type == "CLASSIFICATION" else RandomForestRegressor(n_estimators=30, random_state=42)
-        pipeline = Pipeline([("preprocess", preprocess), ("model", model)])
+        random_state = int(plan.get("random_state", 42))
+        estimators = {
+            "LinearRegression": LinearRegression(),
+            "RandomForestRegressor": RandomForestRegressor(n_estimators=120, random_state=random_state),
+            "LogisticRegression": LogisticRegression(max_iter=1000, random_state=random_state),
+            "RandomForestClassifier": RandomForestClassifier(n_estimators=120, random_state=random_state),
+        }
+        candidate_names = [name for name in plan.get("candidate_models", []) if name in estimators]
+        if not candidate_names:
+            candidate_names = self._allowed_models(task.task_type or "REGRESSION")
+        primary_metric = self._normalize_metric(plan.get("primary_metric") or plan.get("metric"), task.task_type or "REGRESSION")
+        candidate_models = []
+        best_model = None
+        best_score = float("inf") if primary_metric == "rmse" else float("-inf")
+        train_rows = int(len(frame))
+        test_rows = 0
         if len(frame) >= 5 and y.nunique(dropna=True) > 1:
             # 小样本分类在测试集容量不足时不能分层抽样，否则 sklearn 会报错。
-            test_rows = max(1, int(round(len(frame) * 0.2)))
-            stratify = y if task.task_type == "CLASSIFICATION" and y.value_counts().min() >= 2 and test_rows >= y.nunique(dropna=True) else None
-            x_train, x_test, y_train, y_test = train_test_split(x, y, test_size=0.2, random_state=42, stratify=stratify)
-            pipeline.fit(x_train, y_train)
-            prediction = pipeline.predict(x_test)
-            score = accuracy_score(y_test, prediction) if task.task_type == "CLASSIFICATION" else r2_score(y_test, prediction)
+            split = float(plan.get("train_test_split", 0.2))
+            split = min(0.5, max(0.1, split))
+            test_rows = max(1, int(round(len(frame) * split)))
+            stratify = y if task.task_type == "CLASSIFICATION" and plan.get("use_stratify") and y.value_counts().min() >= 2 and test_rows >= y.nunique(dropna=True) else None
+            x_train, x_test, y_train, y_test = train_test_split(x, y, test_size=split, random_state=random_state, stratify=stratify)
+            train_rows = int(len(x_train))
+            test_rows = int(len(x_test))
+            for model_name in candidate_names:
+                try:
+                    pipeline = Pipeline([("preprocess", preprocess), ("model", estimators[model_name])])
+                    pipeline.fit(x_train, y_train)
+                    prediction = pipeline.predict(x_test)
+                    metrics = self._evaluate_predictions(task.task_type or "REGRESSION", y_test, prediction)
+                    summary = {"model_name": model_name, "metrics": metrics}
+                except Exception as exc:
+                    summary = {"model_name": model_name, "metrics": {}, "error": str(exc)}
+                    candidate_models.append(summary)
+                    continue
+                candidate_models.append(summary)
+                comparable = metrics.get(primary_metric)
+                if comparable is None:
+                    continue
+                is_better = comparable < best_score if primary_metric == "rmse" else comparable > best_score
+                if is_better:
+                    best_score = comparable
+                    best_model = summary
         else:
-            pipeline.fit(x, y)
-            score = None
+            for model_name in candidate_names:
+                try:
+                    pipeline = Pipeline([("preprocess", preprocess), ("model", estimators[model_name])])
+                    pipeline.fit(x, y)
+                    summary = {"model_name": model_name, "metrics": {}}
+                except Exception as exc:
+                    summary = {"model_name": model_name, "metrics": {}, "error": str(exc)}
+                candidate_models.append(summary)
+                if best_model is None and "error" not in summary:
+                    best_model = summary
+        if best_model is None:
+            raise DataValidationException("没有可用模型完成训练")
         metrics = {
-            "metric": "accuracy" if task.task_type == "CLASSIFICATION" else "r2_score",
-            "score": None if score is None else float(score),
-            "train_rows": int(len(frame)),
+            "metric": primary_metric,
+            "score": best_model.get("metrics", {}).get(primary_metric),
+            "train_rows": train_rows,
+            "test_rows": test_rows,
+            **best_model.get("metrics", {}),
         }
-        self._record_node_output(task, "model_training", {"metrics": metrics})
+        feature_importance = self._feature_importance(frame, target, features)
+        output = {
+            "metrics": metrics,
+            "best_model": best_model,
+            "candidate_models": candidate_models,
+            "model_plan": plan,
+            "feature_columns": features,
+            "feature_importance": feature_importance,
+        }
+        task.feature_columns_json = features
+        self._record_node_output(task, "model_training", output)
         self._upsert_agent_model(task, metrics)
 
     def _code_generation(self, task: AgentTask) -> None:
@@ -362,8 +456,11 @@ CSV 列名：
         state = self._state(task)
         csv_path = state["context"]["csv_path"]
         target = task.target_column
+        training = state.get("context", {}).get("node_outputs", {}).get("model_training", {})
+        best_model = training.get("best_model", {}).get("model_name")
+        features = training.get("feature_columns") or task.feature_columns_json or []
         code_path = self._task_artifact_dir(task) / "generated_model.py"
-        code = self._render_training_code(csv_path, target or "", task.task_type or "REGRESSION")
+        code = self._render_training_code(csv_path, target or "", task.task_type or "REGRESSION", best_model, features)
         code_path.write_text(code, encoding="utf-8")
         task.generated_code_path = str(code_path)
         artifacts = state.setdefault("artifacts", {})
@@ -375,10 +472,44 @@ CSV 列名：
         self._record_node_output(task, "code_generation", {"generated_code": str(code_path)})
 
     def _operation_report(self, task: AgentTask) -> None:
-        # 汇总前面节点的结构化输出，形成可供前端展示的最终报告。
+        # 汇总前面节点的结构化输出；真实 LLM 模式下生成面向用户的解释和建议。
         state = self._state(task)
         report_path = self._task_artifact_dir(task) / "final_report.json"
         node_outputs = state.get("context", {}).get("node_outputs", {})
+        summary = "Agent 已完成数据分析、模型规划、训练评估、代码生成和报告汇总。"
+        recommendations = []
+        if self.llm_client:
+            report_text = self.llm_client.chat_json(
+                system_prompt="你是 AI4ML 平台的 Operation Agent。请把建模工作流结果解释给非专业用户，只返回 JSON。",
+                user_prompt=f"""
+用户需求：
+{task.task_description}
+
+需求解析：
+{json.dumps(node_outputs.get("manager_parse", {}), ensure_ascii=False, indent=2)}
+
+数据分析：
+{json.dumps(node_outputs.get("data_analysis", {}), ensure_ascii=False, indent=2)}
+
+模型规划：
+{json.dumps(node_outputs.get("model_plan", {}), ensure_ascii=False, indent=2)}
+
+训练结果：
+{json.dumps(node_outputs.get("model_training", {}), ensure_ascii=False, indent=2)}
+
+请返回严格 JSON：
+{{
+  "summary": "用中文 2 到 4 句话说明本次任务做了什么、模型效果如何、能如何使用",
+  "recommendations": ["给零基础用户的使用建议或下一步优化建议，2 到 5 条"],
+  "risk_notes": ["数据或模型风险提示，1 到 3 条"]
+}}
+""".strip(),
+            )
+            summary = str(report_text.get("summary") or summary)
+            recommendations = report_text.get("recommendations") if isinstance(report_text.get("recommendations"), list) else []
+            risk_notes = report_text.get("risk_notes") if isinstance(report_text.get("risk_notes"), list) else []
+        else:
+            risk_notes = ["离线模式使用规则化摘要，未调用真实 LLM 解释结果。"]
         report = {
             "task_id": state.get("task_id"),
             "task_description": task.task_description,
@@ -387,8 +518,11 @@ CSV 列名：
             "feature_columns": task.feature_columns_json or [],
             "metrics": node_outputs.get("model_training", {}).get("metrics", {}),
             "model_plan": node_outputs.get("model_plan", {}),
+            "model_training": node_outputs.get("model_training", {}),
             "data_analysis": node_outputs.get("data_analysis", {}),
-            "summary": "Agent 已完成数据分析、模型规划、训练评估、代码生成和报告汇总。",
+            "summary": summary,
+            "recommendations": recommendations,
+            "risk_notes": risk_notes,
         }
         report_path.write_text(json.dumps(report, ensure_ascii=False, indent=2), encoding="utf-8")
         task.report_url = str(report_path)
@@ -455,6 +589,98 @@ CSV 列名：
             raise DataValidationException("任务数据集文件不存在")
         return pd.read_csv(csv_path)
 
+    def _allowed_models(self, task_type: str) -> List[str]:
+        # 限制 LLM 规划只能选择后端已经实现并测试过的 sklearn 模型。
+        if task_type == "CLASSIFICATION":
+            return ["LogisticRegression", "RandomForestClassifier"]
+        return ["LinearRegression", "RandomForestRegressor"]
+
+    def _normalize_metric(self, metric: Any, task_type: str) -> str:
+        # 兼容 r2 / r2_score、大小写和空值，保证训练比较时指标合法。
+        value = str(metric or "").lower()
+        if task_type == "CLASSIFICATION":
+            return "accuracy" if value not in {"f1"} else "f1"
+        if value in {"rmse"}:
+            return "rmse"
+        return "r2_score"
+
+    def _normalize_model_plan(self, plan: Dict[str, Any], task_type: str, allowed_models: List[str]) -> Dict[str, Any]:
+        # 真实 LLM 的输出必须被压到可执行范围内，不能让模型名或指标幻觉进入训练。
+        raw_candidates = plan.get("candidate_models") or [plan.get("model_name")]
+        if not isinstance(raw_candidates, list):
+            raw_candidates = [raw_candidates]
+        candidate_models = [str(name) for name in raw_candidates if str(name) in allowed_models]
+        if not candidate_models:
+            candidate_models = allowed_models
+        split = plan.get("train_test_split", plan.get("test_size", 0.2))
+        try:
+            split = float(split)
+        except (TypeError, ValueError):
+            split = 0.2
+        split = min(0.5, max(0.1, split))
+        return {
+            "framework": "sklearn",
+            "model_name": candidate_models[0],
+            "candidate_models": candidate_models,
+            "metric": self._normalize_metric(plan.get("metric") or plan.get("primary_metric"), task_type),
+            "primary_metric": self._normalize_metric(plan.get("primary_metric") or plan.get("metric"), task_type),
+            "train_test_split": split,
+            "random_state": self._safe_int(plan.get("random_state"), 42),
+            "use_stratify": bool(plan.get("use_stratify", task_type == "CLASSIFICATION")),
+            "preprocess": str(plan.get("preprocess") or "数值特征填充中位数并标准化，类别特征填充众数并做 OneHot 编码"),
+            "reason": str(plan.get("reason") or "根据任务类型和数据规模选择可执行的 sklearn 候选模型。"),
+            "llm_used": self.llm_client is not None,
+        }
+
+    def _effective_model_plan(self, task: AgentTask) -> Dict[str, Any]:
+        # 读取模型规划节点输出，并合并人工审核阶段可能提交的局部修改。
+        state = self._state(task)
+        plan = dict(state.get("context", {}).get("node_outputs", {}).get("model_plan", {}))
+        for item in state.get("context", {}).get("human_patches", []):
+            if item.get("stage") != "model_plan_review":
+                continue
+            patch = item.get("patch") or {}
+            for key, value in patch.items():
+                normalized_key = key.removeprefix("model_plan.")
+                plan[normalized_key] = value
+        return self._normalize_model_plan(plan, task.task_type or "REGRESSION", self._allowed_models(task.task_type or "REGRESSION"))
+
+    def _safe_int(self, value: Any, fallback: int) -> int:
+        try:
+            return int(value)
+        except (TypeError, ValueError):
+            return fallback
+
+    def _evaluate_predictions(self, task_type: str, y_true: pd.Series, prediction: Any) -> Dict[str, float]:
+        # 根据任务类型计算适合前端报告展示和模型比较的指标。
+        from sklearn.metrics import accuracy_score, f1_score, mean_absolute_error, mean_squared_error, r2_score
+
+        if task_type == "CLASSIFICATION":
+            return {
+                "accuracy": round(float(accuracy_score(y_true, prediction)), 6),
+                "f1": round(float(f1_score(y_true, prediction, average="weighted", zero_division=0)), 6),
+            }
+        return {
+            "mae": round(float(mean_absolute_error(y_true, prediction)), 6),
+            "rmse": round(float(math.sqrt(mean_squared_error(y_true, prediction))), 6),
+            "r2_score": round(float(r2_score(y_true, prediction)), 6),
+        }
+
+    def _feature_importance(self, frame: pd.DataFrame, target: str, features: List[str]) -> List[Dict[str, Any]]:
+        # 用相关系数生成轻量可解释性信息；非数值字段没有可靠系数时跳过。
+        if target not in frame.columns or not pd.api.types.is_numeric_dtype(frame[target]):
+            return []
+        rows = []
+        target_series = frame[target]
+        for column in features:
+            if column not in frame.columns or not pd.api.types.is_numeric_dtype(frame[column]):
+                continue
+            corr = frame[column].corr(target_series)
+            if pd.isna(corr):
+                continue
+            rows.append({"feature": column, "importance": round(abs(float(corr)), 6), "direction": "positive" if corr >= 0 else "negative"})
+        return sorted(rows, key=lambda item: item["importance"], reverse=True)[:10]
+
     def _infer_target_column(self, request: str, columns: List[str]) -> str:
         # 优先从用户描述中匹配列名，否则默认最后一列为目标列。
         patterns = [
@@ -502,8 +728,11 @@ CSV 列名：
         non_null = target_series.dropna()
         if not pd.api.types.is_numeric_dtype(non_null):
             return "CLASSIFICATION"
+        if pd.api.types.is_float_dtype(non_null) and not (non_null.dropna() % 1 == 0).all():
+            return "REGRESSION"
         unique_count = int(non_null.nunique())
-        if unique_count <= max(10, int(len(non_null) * 0.1)):
+        classification_threshold = min(10, max(2, int(len(non_null) * 0.1)))
+        if unique_count <= classification_threshold:
             return "CLASSIFICATION"
         return "REGRESSION"
 
@@ -522,40 +751,58 @@ CSV 列名：
         artifact_dir.mkdir(parents=True, exist_ok=True)
         return artifact_dir
 
-    def _render_training_code(self, csv_path: str, target_column: str, task_type: str) -> str:
-        # 生成代码保持无中文乱码，且只依赖 requirements.txt 中已有的 pandas/sklearn。
-        model_import = "RandomForestClassifier" if task_type == "CLASSIFICATION" else "RandomForestRegressor"
-        model_class = "RandomForestClassifier" if task_type == "CLASSIFICATION" else "RandomForestRegressor"
+    def _render_training_code(self, csv_path: str, target_column: str, task_type: str, model_name: str | None, feature_columns: List[str]) -> str:
+        # 生成代码跟随训练阶段选出的最佳模型和特征列，预测接口会直接执行该 train()。
+        fallback = "RandomForestClassifier" if task_type == "CLASSIFICATION" else "RandomForestRegressor"
+        model_class = model_name if model_name in self._allowed_models(task_type) else fallback
+        feature_literal = json.dumps(feature_columns, ensure_ascii=False)
+        estimator_map = {
+            "LinearRegression": "LinearRegression()",
+            "RandomForestRegressor": "RandomForestRegressor(n_estimators=120, random_state=42)",
+            "LogisticRegression": "LogisticRegression(max_iter=1000, random_state=42)",
+            "RandomForestClassifier": "RandomForestClassifier(n_estimators=120, random_state=42)",
+        }
         return f'''from pathlib import Path
 
 import pandas as pd
 from sklearn.compose import ColumnTransformer
-from sklearn.ensemble import {model_import}
+from sklearn.ensemble import RandomForestClassifier, RandomForestRegressor
 from sklearn.impute import SimpleImputer
+from sklearn.linear_model import LinearRegression, LogisticRegression
 from sklearn.pipeline import Pipeline
-from sklearn.preprocessing import OneHotEncoder
+from sklearn.preprocessing import OneHotEncoder, StandardScaler
 
 
 # 后端生成的训练数据路径，部署时应保证该文件仍在服务器本地。
 DATA_PATH = Path(r"{csv_path}")
 TARGET_COLUMN = "{target_column}"
+FEATURE_COLUMNS = {feature_literal}
+MODEL_NAME = "{model_class}"
 
 
 def train():
     # 训练入口供后端预测接口调用，返回模型、特征列和目标列。
     frame = pd.read_csv(DATA_PATH)
-    feature_columns = [column for column in frame.columns if column != TARGET_COLUMN]
+    feature_columns = [column for column in FEATURE_COLUMNS if column in frame.columns and column != TARGET_COLUMN]
+    if not feature_columns:
+        feature_columns = [column for column in frame.columns if column != TARGET_COLUMN]
     x = frame[feature_columns]
     y = frame[TARGET_COLUMN]
     numeric_features = list(x.select_dtypes(include="number").columns)
     categorical_features = [column for column in feature_columns if column not in numeric_features]
     preprocess = ColumnTransformer(
         transformers=[
-            ("num", SimpleImputer(strategy="median"), numeric_features),
+            ("num", Pipeline([("imputer", SimpleImputer(strategy="median")), ("scaler", StandardScaler())]), numeric_features),
             ("cat", Pipeline([("imputer", SimpleImputer(strategy="most_frequent")), ("onehot", OneHotEncoder(handle_unknown="ignore"))]), categorical_features),
         ]
     )
-    model = {model_class}(n_estimators=30, random_state=42)
+    estimators = {{
+        "LinearRegression": LinearRegression(),
+        "RandomForestRegressor": RandomForestRegressor(n_estimators=120, random_state=42),
+        "LogisticRegression": LogisticRegression(max_iter=1000, random_state=42),
+        "RandomForestClassifier": RandomForestClassifier(n_estimators=120, random_state=42),
+    }}
+    model = estimators.get(MODEL_NAME, {estimator_map[model_class]})
     pipeline = Pipeline([("preprocess", preprocess), ("model", model)])
     pipeline.fit(x, y)
     return pipeline, feature_columns, TARGET_COLUMN
