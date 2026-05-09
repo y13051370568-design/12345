@@ -138,6 +138,18 @@ class AgentService:
             raise ResourceNotFoundException("任务尚未生成报告")
         return read_json_artifact(report_path)
 
+    def get_report_markdown_path(self, db: Session, task_id: str, current_user: Any) -> Path:
+        # Markdown 报告作为可下载文件产物返回，便于用户离线查看和二次编辑。
+        task = self.get_task_by_public_id(db, task_id, current_user)
+        artifacts = self._artifacts(task)
+        markdown_path = artifacts.get("final_report_markdown")
+        if not markdown_path:
+            raise ResourceNotFoundException("任务尚未生成 Markdown 报告")
+        path = Path(str(markdown_path))
+        if not path.exists() or not path.is_file():
+            raise ResourceNotFoundException("Markdown 报告文件不存在或已被清理")
+        return path
+
     def get_code(self, db: Session, task_id: str, current_user: Any) -> Dict[str, str]:
         # 代码查看属于开发者能力，避免普通用户误操作或看到过多实现细节。
         if current_user.role not in {"DEVELOPER", "ADMIN"}:

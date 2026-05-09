@@ -500,6 +500,7 @@ CSV 列名：
         # 汇总前面节点的结构化输出；真实 LLM 模式下生成面向用户的解释和建议。
         state = self._state(task)
         report_path = self._task_artifact_dir(task) / "final_report.json"
+        markdown_path = self._task_artifact_dir(task) / "final_report.md"
         node_outputs = state.get("context", {}).get("node_outputs", {})
         summary = "Agent 已完成数据分析、模型规划、训练评估、代码生成和报告汇总。"
         recommendations = []
@@ -550,13 +551,77 @@ CSV 列名：
             "risk_notes": risk_notes,
         }
         report_path.write_text(json.dumps(report, ensure_ascii=False, indent=2), encoding="utf-8")
+        markdown_path.write_text(self._render_markdown_report(report), encoding="utf-8")
         task.report_url = str(report_path)
         artifacts = state.setdefault("artifacts", {})
         artifacts["final_report"] = str(report_path)
+        artifacts["final_report_markdown"] = str(markdown_path)
         task.result_demo_url = f"/api/agent/tasks/{state['task_id']}/predict"
         task.state_json = state
         flag_modified(task, "state_json")
-        self._record_node_output(task, "operation_report", {"final_report": str(report_path)})
+        self._record_node_output(task, "operation_report", {"final_report": str(report_path), "final_report_markdown": str(markdown_path)})
+
+    def _render_markdown_report(self, report: Dict[str, Any]) -> str:
+        # 将结构化报告转换为适合下载和二次编辑的 Markdown 文本。
+        metrics = report.get("metrics") or {}
+        model_plan = report.get("model_plan") or {}
+        model_training = report.get("model_training") or {}
+        data_analysis = report.get("data_analysis") or {}
+        feature_importance = model_training.get("feature_importance") or report.get("feature_importance") or []
+        candidate_models = model_training.get("candidate_models") or []
+        lines = [
+            f"# AI4ML 模型报告 - {report.get('task_id') or ''}".strip(),
+            "",
+            "## 核心观点",
+            report.get("summary") or "暂无摘要。",
+            "",
+            "## 任务信息",
+            f"- 任务描述：{report.get('task_description') or '-'}",
+            f"- 任务类型：{report.get('task_type') or '-'}",
+            f"- 目标列：{report.get('target_column') or '-'}",
+            f"- 特征列：{', '.join(report.get('feature_columns') or []) or '-'}",
+            "",
+            "## 训练指标",
+        ]
+        if metrics:
+            lines.extend([f"- {key}：{value}" for key, value in metrics.items()])
+        else:
+            lines.append("- 暂无训练指标。")
+        lines.extend(["", "## 候选模型"])
+        if candidate_models:
+            for item in candidate_models:
+                item_metrics = item.get("metrics") or {}
+                metric_text = "，".join(f"{key}={value}" for key, value in item_metrics.items()) or "暂无指标"
+                lines.append(f"- {item.get('model_name') or '-'}：{metric_text}")
+        else:
+            lines.append("- 暂无候选模型信息。")
+        lines.extend(["", "## 特征重要性"])
+        if feature_importance:
+            lines.extend(["| 特征 | 影响强度 | 方向 |", "| --- | ---: | --- |"])
+            for item in feature_importance:
+                direction = "正相关" if item.get("direction") == "positive" else "负相关"
+                lines.append(f"| {item.get('feature') or '-'} | {item.get('importance') or 0} | {direction} |")
+        else:
+            lines.append("- 暂无特征重要性信息。")
+        lines.extend(["", "## 数据分析"])
+        lines.append(f"- 行数：{data_analysis.get('row_count') or '-'}")
+        lines.append(f"- 列数：{data_analysis.get('column_count') or '-'}")
+        if data_analysis.get("selection_reason"):
+            lines.append(f"- 选列说明：{data_analysis.get('selection_reason')}")
+        lines.extend(["", "## 模型规划"])
+        lines.append(f"- 主指标：{model_plan.get('primary_metric') or model_plan.get('metric') or '-'}")
+        lines.append(f"- 候选模型：{', '.join(model_plan.get('candidate_models') or []) or '-'}")
+        lines.append(f"- 预处理策略：{model_plan.get('preprocess') or '-'}")
+        if model_plan.get("reason"):
+            lines.append(f"- 规划原因：{model_plan.get('reason')}")
+        lines.extend(["", "## 使用建议"])
+        recommendations = report.get("recommendations") or []
+        lines.extend([f"- {item}" for item in recommendations] or ["- 暂无使用建议。"])
+        lines.extend(["", "## 风险提示"])
+        risk_notes = report.get("risk_notes") or []
+        lines.extend([f"- {item}" for item in risk_notes] or ["- 暂无风险提示。"])
+        lines.append("")
+        return "\n".join(lines)
 
     def _pause_for_review(self, task: AgentTask, review_stage: str, node: str) -> None:
         # 将节点输出转换为待审核内容，前端提交审核后再进入下一个节点。
