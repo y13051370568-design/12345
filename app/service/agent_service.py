@@ -1,11 +1,13 @@
 from __future__ import annotations
 
+import ast
 from pathlib import Path
 from typing import Any, Dict, List, Optional
 
 import joblib
 from fastapi import UploadFile
 from sqlalchemy.orm import Session
+from sqlalchemy.orm.attributes import flag_modified
 
 from app.core.exceptions import AuthorizationException, DataValidationException, ResourceNotFoundException
 from app.models.agent import AgentDataset, AgentTask, AgentTaskReview, AgentWorkflow
@@ -146,6 +148,62 @@ class AgentService:
         if not code_path:
             raise ResourceNotFoundException("任务尚未生成代码")
         return {"path": code_path, "python_code": read_text_artifact(code_path)}
+
+    def update_code(self, db: Session, task_id: str, payload: Any, current_user: Any) -> Dict[str, str]:
+        # 保存开发者修改后的 Python 代码；先做语法校验，再记录版本和审核历史。
+        if current_user.role not in {"DEVELOPER", "ADMIN"}:
+            raise AuthorizationException("只有开发者或管理员可以修改代码")
+        task = self.get_task_by_public_id(db, task_id, current_user)
+        python_code = payload.python_code
+        try:
+            ast.parse(python_code)
+        except SyntaxError as exc:
+            line = exc.lineno or 0
+            offset = exc.offset or 0
+            raise DataValidationException(f"Python 语法错误：第 {line} 行第 {offset} 列，{exc.msg}")
+
+        artifacts = self._artifacts(task)
+        previous_path = artifacts.get("generated_code") or task.generated_code_path
+        if previous_path:
+            code_path = Path(str(previous_path))
+        else:
+            code_path = Path("uploads/agent/artifacts") / task_id / "generated_model.py"
+        code_path.parent.mkdir(parents=True, exist_ok=True)
+        before_version = task.version
+        after_version = before_version + 1
+        versioned_path = code_path.with_name(f"{code_path.stem}_v{after_version}{code_path.suffix or '.py'}")
+        versioned_path.write_text(python_code, encoding="utf-8")
+
+        state = dict(task.state_json or {})
+        state_artifacts = state.setdefault("artifacts", {})
+        state_context = state.setdefault("context", {})
+        state_context_artifacts = state_context.setdefault("artifacts", {})
+        state_artifacts["generated_code"] = str(versioned_path)
+        state_context_artifacts["generated_code"] = str(versioned_path)
+        task.generated_code_path = str(versioned_path)
+        task.version = after_version
+        task.state_json = state
+        flag_modified(task, "state_json")
+        db.add(
+            AgentTaskReview(
+                task_id=task.id,
+                operator_user_id=current_user.id,
+                review_stage="code_review",
+                action="save_code",
+                patch_json={
+                    "previous_code_path": str(previous_path) if previous_path else None,
+                    "new_code_path": str(versioned_path),
+                    "python_code": python_code,
+                    "syntax_check": "passed",
+                },
+                comment=payload.comment or "保存代码修改",
+                before_version=before_version,
+                after_version=after_version,
+            )
+        )
+        db.commit()
+        db.refresh(task)
+        return {"path": str(versioned_path), "python_code": read_text_artifact(str(versioned_path))}
 
     def predict(self, db: Session, task_id: str, features: List[Dict[str, Any]], current_user: Any) -> Dict[str, Any]:
         # 轻量级 Web Demo 实现：优先加载训练阶段持久化的模型产物，避免每次预测重复训练。

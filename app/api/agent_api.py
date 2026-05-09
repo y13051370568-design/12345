@@ -4,7 +4,7 @@ from sqlalchemy.orm import Session
 
 from app.core.auth import get_current_user
 from app.db import get_db_session
-from app.schemas.agent import ApiResponse, PredictRequest, ReviewSubmit, TaskCreate, TaskRunRequest, WorkflowShare
+from app.schemas.agent import ApiResponse, CodeUpdateRequest, PredictRequest, ReviewSubmit, TaskCreate, TaskRunRequest, WorkflowShare
 from app.service.agent_service import agent_service
 
 
@@ -298,6 +298,23 @@ def get_code(
     - 用于开发者审查、修改或下载模型训练逻辑。
     """
     return ApiResponse(data=agent_service.get_code(db, task_id, current_user))
+
+
+@router.put("/tasks/{task_id}/code", summary="保存 Agent 代码修改")
+def update_code(
+    task_id: str,
+    payload: CodeUpdateRequest,
+    db: Session = Depends(get_db_session),
+    current_user=Depends(get_current_user),
+):
+    """
+    保存开发者修改后的 Operation Agent 代码。
+
+    - 仅 `DEVELOPER` 和 `ADMIN` 可以保存。
+    - 后端会使用 `ast.parse` 做 Python 基础语法校验。
+    - 校验通过后写入新版本代码文件，并在审核历史中记录版本变化。
+    """
+    return ApiResponse(message="代码保存成功", data=agent_service.update_code(db, task_id, payload, current_user))
 
 
 @router.get("/tasks/{task_id}/download", summary="下载 Agent 任务产物")

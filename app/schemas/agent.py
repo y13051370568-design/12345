@@ -116,6 +116,12 @@ class PredictRequest(BaseModel):
     )
 
 
+class CodeUpdateRequest(BaseModel):
+    # 开发者保存修改后的 Operation Agent 代码，后端会先做 Python 语法校验。
+    python_code: str = Field(..., min_length=1, description="修改后的完整 Python 代码")
+    comment: str = Field("", description="本次代码修改说明")
+
+
 class WorkflowOut(BaseModel):
     # 工作流列表返回可复用、可 Fork 的元信息。
     id: int
