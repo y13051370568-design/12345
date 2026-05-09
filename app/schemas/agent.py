@@ -70,6 +70,7 @@ class TaskSummary(BaseModel):
     result_demo_url: Optional[str] = None
     report_url: Optional[str] = None
     generated_code_path: Optional[str] = None
+    model_artifact_path: Optional[str] = None
     fail_reason: Optional[str] = None
     created_at: datetime
     updated_at: datetime

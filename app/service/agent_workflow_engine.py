@@ -345,13 +345,14 @@ CSV 列名：
         self._record_node_output(task, "model_plan", output)
 
     def _model_training(self, task: AgentTask) -> None:
-        # 训练多个候选模型并选择最佳结果，只记录可审计摘要，不持久化 pickle。
+        # 训练多个候选模型并选择最佳结果，并将最终可预测 Pipeline 持久化到任务产物目录。
         state = self._state(task)
         frame = self._load_frame(state)
         target = task.target_column
         if not target or target not in frame.columns:
             raise DataValidationException("目标列不存在，无法训练")
 
+        import joblib
         from sklearn.compose import ColumnTransformer
         from sklearn.ensemble import RandomForestClassifier, RandomForestRegressor
         from sklearn.impute import SimpleImputer
@@ -368,12 +369,16 @@ CSV 列名：
         y = frame[target]
         numeric_features = list(x.select_dtypes(include="number").columns)
         categorical_features = [column for column in features if column not in numeric_features]
-        preprocess = ColumnTransformer(
-            transformers=[
-                ("num", Pipeline([("imputer", SimpleImputer(strategy="median")), ("scaler", StandardScaler())]), numeric_features),
-                ("cat", Pipeline([("imputer", SimpleImputer(strategy="most_frequent")), ("onehot", OneHotEncoder(handle_unknown="ignore"))]), categorical_features),
-            ]
-        )
+
+        def build_preprocess() -> ColumnTransformer:
+            # 每个候选模型使用独立预处理器，避免 Pipeline 训练状态互相污染。
+            return ColumnTransformer(
+                transformers=[
+                    ("num", Pipeline([("imputer", SimpleImputer(strategy="median")), ("scaler", StandardScaler())]), numeric_features),
+                    ("cat", Pipeline([("imputer", SimpleImputer(strategy="most_frequent")), ("onehot", OneHotEncoder(handle_unknown="ignore"))]), categorical_features),
+                ]
+            )
+
         random_state = int(plan.get("random_state", 42))
         estimators = {
             "LinearRegression": LinearRegression(),
@@ -401,7 +406,7 @@ CSV 列名：
             test_rows = int(len(x_test))
             for model_name in candidate_names:
                 try:
-                    pipeline = Pipeline([("preprocess", preprocess), ("model", estimators[model_name])])
+                    pipeline = Pipeline([("preprocess", build_preprocess()), ("model", estimators[model_name])])
                     pipeline.fit(x_train, y_train)
                     prediction = pipeline.predict(x_test)
                     metrics = self._evaluate_predictions(task.task_type or "REGRESSION", y_test, prediction)
@@ -421,7 +426,7 @@ CSV 列名：
         else:
             for model_name in candidate_names:
                 try:
-                    pipeline = Pipeline([("preprocess", preprocess), ("model", estimators[model_name])])
+                    pipeline = Pipeline([("preprocess", build_preprocess()), ("model", estimators[model_name])])
                     pipeline.fit(x, y)
                     summary = {"model_name": model_name, "metrics": {}}
                 except Exception as exc:
@@ -438,6 +443,20 @@ CSV 列名：
             "test_rows": test_rows,
             **best_model.get("metrics", {}),
         }
+        best_model_name = best_model.get("model_name")
+        final_pipeline = Pipeline([("preprocess", build_preprocess()), ("model", estimators[best_model_name])])
+        final_pipeline.fit(x, y)
+        model_path = self._task_artifact_dir(task) / "model.joblib"
+        joblib.dump(
+            {
+                "model": final_pipeline,
+                "feature_columns": features,
+                "target_column": target,
+                "task_type": task.task_type,
+                "best_model": best_model_name,
+            },
+            model_path,
+        )
         feature_importance = self._feature_importance(frame, target, features)
         output = {
             "metrics": metrics,
@@ -446,10 +465,16 @@ CSV 列名：
             "model_plan": plan,
             "feature_columns": features,
             "feature_importance": feature_importance,
+            "model_artifact": str(model_path),
         }
         task.feature_columns_json = features
+        task.model_artifact_path = str(model_path)
+        artifacts = state.setdefault("artifacts", {})
+        artifacts["model_artifact"] = str(model_path)
+        task.state_json = state
+        flag_modified(task, "state_json")
         self._record_node_output(task, "model_training", output)
-        self._upsert_agent_model(task, metrics)
+        self._upsert_agent_model(task, metrics, str(model_path))
 
     def _code_generation(self, task: AgentTask) -> None:
         # 生成可独立运行的训练代码，预测接口会调用其中的 train()。
@@ -808,11 +833,12 @@ def train():
     return pipeline, feature_columns, TARGET_COLUMN
 '''
 
-    def _upsert_agent_model(self, task: AgentTask, metrics: Dict[str, Any]) -> None:
+    def _upsert_agent_model(self, task: AgentTask, metrics: Dict[str, Any], model_artifact_path: str | None = None) -> None:
         # 训练完成后沉淀一条模型资源记录，后续可接入模型广场审核流程。
         existing = self.db.query(AgentModel).filter(AgentModel.task_id == task.id).first()
         if existing:
             existing.performance_metrics = metrics
+            existing.model_artifact_path = model_artifact_path
             self.db.commit()
             return
         model = AgentModel(
@@ -825,7 +851,7 @@ def train():
             feature_columns_json=task.feature_columns_json,
             framework="sklearn",
             performance_metrics=metrics,
-            model_artifact_path=None,
+            model_artifact_path=model_artifact_path,
             is_public=0,
             audit_status="PENDING",
             is_recommended=0,

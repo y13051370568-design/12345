@@ -1,7 +1,9 @@
 from __future__ import annotations
 
+from pathlib import Path
 from typing import Any, Dict, List, Optional
 
+import joblib
 from fastapi import UploadFile
 from sqlalchemy.orm import Session
 
@@ -146,23 +148,33 @@ class AgentService:
         return {"path": code_path, "python_code": read_text_artifact(code_path)}
 
     def predict(self, db: Session, task_id: str, features: List[Dict[str, Any]], current_user: Any) -> Dict[str, Any]:
-        # 轻量级 Web Demo 实现：执行生成代码中的 train()，再用提交的多条特征做批量预测。
+        # 轻量级 Web Demo 实现：优先加载训练阶段持久化的模型产物，避免每次预测重复训练。
         task = self.get_task_by_public_id(db, task_id, current_user)
         if task.status != "COMPLETED":
             raise DataValidationException("任务尚未完成，不能进行预测")
         rows = features
         if any(not row for row in rows):
             raise DataValidationException("预测输入数组中的每一行都必须是非空样本对象")
-        code_info = self.get_code(db, task_id, current_user if current_user.role in {"DEVELOPER", "ADMIN"} else self._as_developer(current_user))
-        namespace: Dict[str, Any] = {}
-        exec(code_info["python_code"], namespace)
-        train_func = namespace.get("train")
-        if not callable(train_func):
-            raise DataValidationException("生成代码中缺少 train() 函数，无法执行预测")
-        model, _, _ = train_func()
         import pandas as pd
 
+        artifacts = self._artifacts(task)
+        model_path = task.model_artifact_path or artifacts.get("model_artifact")
+        if not model_path:
+            raise ResourceNotFoundException("模型文件尚未生成，请先完成训练任务")
+        artifact_path = Path(str(model_path))
+        if not artifact_path.exists() or not artifact_path.is_file():
+            raise ResourceNotFoundException("模型文件不存在或已被清理，请重新运行任务生成模型")
+        model_bundle = joblib.load(artifact_path)
+        model = model_bundle.get("model") if isinstance(model_bundle, dict) else model_bundle
+        feature_columns = model_bundle.get("feature_columns") if isinstance(model_bundle, dict) else task.feature_columns_json
+        if not hasattr(model, "predict"):
+            raise DataValidationException("模型文件格式不正确，无法执行预测")
         frame = pd.DataFrame(rows)
+        if feature_columns:
+            missing_columns = [column for column in feature_columns if column not in frame.columns]
+            if missing_columns:
+                raise DataValidationException(f"预测输入缺少特征列：{', '.join(missing_columns)}")
+            frame = frame[feature_columns]
         prediction = model.predict(frame)
         values = prediction.tolist() if hasattr(prediction, "tolist") else list(prediction)
         records = [
@@ -324,6 +336,7 @@ class AgentService:
             "result_demo_url": task.result_demo_url,
             "report_url": task.report_url,
             "generated_code_path": task.generated_code_path or (artifacts or {}).get("generated_code"),
+            "model_artifact_path": task.model_artifact_path or (artifacts or {}).get("model_artifact"),
             "fail_reason": task.fail_reason,
             "created_at": task.created_at,
             "updated_at": task.updated_at,
