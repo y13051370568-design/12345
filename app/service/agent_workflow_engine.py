@@ -3,6 +3,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Dict, List
+import ast
 import json
 import math
 import re
@@ -145,6 +146,8 @@ class AgentWorkflowEngine:
             state["pending_review"] = None
         else:
             if action == "edit_and_continue" and patch:
+                self._apply_review_patch(task, review_stage, patch, after_version)
+                state = self._state(task)
                 # 补丁合并到上下文，供后续节点读取；当前实现保留原结构便于前端展示。
                 state.setdefault("context", {}).setdefault("human_patches", []).append(
                     {"stage": review_stage, "patch": patch, "comment": comment}
@@ -173,6 +176,43 @@ class AgentWorkflowEngine:
         )
         self.db.commit()
         self.db.refresh(task)
+
+    def _apply_review_patch(self, task: AgentTask, review_stage: str, patch: Dict[str, Any], after_version: int) -> None:
+        # 不同审核节点可以把人工修改写回对应上下文；代码审核会保存开发者编辑后的 Python 代码。
+        if review_stage != "code_review":
+            return
+        python_code = patch.get("python_code")
+        if python_code is None:
+            return
+        if not isinstance(python_code, str) or not python_code.strip():
+            raise DataValidationException("代码审核修改不能为空")
+        try:
+            ast.parse(python_code)
+        except SyntaxError as exc:
+            line = exc.lineno or 0
+            offset = exc.offset or 0
+            raise DataValidationException(f"Python 语法错误：第 {line} 行第 {offset} 列，{exc.msg}")
+
+        state = self._state(task)
+        artifacts = state.setdefault("artifacts", {})
+        context = state.setdefault("context", {})
+        context_artifacts = context.setdefault("artifacts", {})
+        previous_path = artifacts.get("generated_code") or task.generated_code_path
+        if previous_path:
+            code_path = Path(str(previous_path))
+        else:
+            code_path = self._task_artifact_dir(task) / "generated_model.py"
+        code_path.parent.mkdir(parents=True, exist_ok=True)
+        versioned_path = code_path.with_name(f"{code_path.stem}_review_v{after_version}{code_path.suffix or '.py'}")
+        versioned_path.write_text(python_code, encoding="utf-8")
+        artifacts["generated_code"] = str(versioned_path)
+        context_artifacts["generated_code"] = str(versioned_path)
+        node_outputs = context.setdefault("node_outputs", {})
+        node_outputs.setdefault("code_generation", {})["generated_code"] = str(versioned_path)
+        node_outputs.setdefault("code_generation", {})["python_code"] = python_code
+        task.generated_code_path = str(versioned_path)
+        task.state_json = state
+        flag_modified(task, "state_json")
 
     def _execute_until_pause_or_finish(self, task: AgentTask) -> None:
         # 同步执行节点直到遇到启用的 HITL 审核点或工作流完成。
@@ -657,11 +697,16 @@ CSV 列名：
     def _pause_for_review(self, task: AgentTask, review_stage: str, node: str) -> None:
         # 将节点输出转换为待审核内容，前端提交审核后再进入下一个节点。
         state = self._state(task)
+        payload = dict(state.get("context", {}).get("node_outputs", {}).get(node, {}))
+        if review_stage == "code_review":
+            code_path = payload.get("generated_code") or state.get("artifacts", {}).get("generated_code") or task.generated_code_path
+            payload["generated_code"] = code_path
+            payload["python_code"] = self._read_review_code(code_path)
         pending = {
             "review_stage": review_stage,
             "node": node,
             "version": task.version,
-            "payload": state.get("context", {}).get("node_outputs", {}).get(node, {}),
+            "payload": payload,
         }
         task.status = "WAITING_HUMAN"
         task.current_node = review_stage
@@ -670,6 +715,15 @@ CSV 列名：
         state["current_node"] = review_stage
         state["pending_review"] = pending
         self._sync_task_state(task, state)
+
+    def _read_review_code(self, code_path: str | None) -> str:
+        # 代码审核需要把文件正文交给前端编辑，路径只作为辅助信息展示。
+        if not code_path:
+            return ""
+        path = Path(str(code_path))
+        if not path.exists() or not path.is_file():
+            return ""
+        return path.read_text(encoding="utf-8")
 
     def _complete_task(self, task: AgentTask) -> None:
         # 完成态会清空 current_node 和 pending_review，前端据此停止轮询。
