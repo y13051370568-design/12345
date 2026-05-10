@@ -33,7 +33,12 @@ class ModelService:
     @staticmethod
     def get_model_by_id(db: Session, model_id: int) -> Optional[AIModel]:
         """通过ID获取模型"""
-        return db.query(AIModel).filter(AIModel.id == model_id).first()
+        model = db.query(AIModel).filter(AIModel.id == model_id).first()
+        if model:
+            model.view_count += 1
+            db.commit()
+            db.refresh(model)
+        return model
 
     @staticmethod
     def update_model(db: Session, model_id: int, model_in: ModelUpdate, user_id: int) -> AIModel:

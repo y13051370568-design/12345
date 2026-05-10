@@ -32,6 +32,7 @@ class DatasetOut(DatasetBase):
     id: int
     user_id: int
     status: int
+    view_count: int
     rejection_reason: Optional[str] = None
     file_size: Optional[int]
     row_count: Optional[int]

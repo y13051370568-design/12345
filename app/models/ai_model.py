@@ -19,6 +19,8 @@ class AIModel(Base):
     is_public = Column(Boolean, default=False)
     is_recommended = Column(Boolean, default=False)
     
+    view_count = Column(Integer, default=0)
+    
     rejection_reason = Column(String(255))
     resource_url = Column(String(255))
     

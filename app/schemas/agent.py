@@ -103,8 +103,26 @@ class WorkflowShare(BaseModel):
     task_id: str
     title: str = Field(..., min_length=1, max_length=100)
     description: Optional[str] = None
+    category: Optional[str] = None
     applicable_task_types: Optional[str] = None
     tags: Optional[str] = None
+
+
+class WorkflowUpdate(BaseModel):
+    title: Optional[str] = None
+    description: Optional[str] = None
+    category: Optional[str] = None
+    applicable_task_types: Optional[str] = None
+    tags: Optional[str] = None
+    is_public: Optional[int] = None
+
+
+class WorkflowAudit(BaseModel):
+    audit_status: str  # APPROVED, REJECTED
+    rejection_reason: Optional[str] = None
+    category: Optional[str] = None
+    tags: Optional[str] = None
+    is_recommended: Optional[int] = None
 
 
 class PredictRequest(BaseModel):
@@ -128,8 +146,18 @@ class WorkflowOut(BaseModel):
     task_id: int
     title: str
     description: Optional[str] = None
+    category: Optional[str] = None
+    tags: Optional[str] = None
     applicable_task_types: Optional[str] = None
     fork_from_id: Optional[int] = None
+    view_count: int
+    fork_count: int
+    is_recommended: int
     is_public: int
     audit_status: str
+    rejection_reason: Optional[str] = None
     created_at: datetime
+    updated_at: datetime
+
+    class Config:
+        from_attributes = True

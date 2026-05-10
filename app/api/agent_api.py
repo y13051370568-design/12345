@@ -2,9 +2,11 @@ from fastapi import APIRouter, Depends, File, Query, UploadFile
 from fastapi.responses import FileResponse
 from sqlalchemy.orm import Session
 
-from app.core.auth import get_current_user
+from app.core.auth import get_current_user, admin_required
 from app.db import get_db_session
-from app.schemas.agent import ApiResponse, CodeUpdateRequest, PredictRequest, ReviewSubmit, TaskCreate, TaskRunRequest, WorkflowShare
+from app.models.agent import AgentWorkflow
+from app.models.user import User
+from app.schemas.agent import ApiResponse, CodeUpdateRequest, PredictRequest, ReviewSubmit, TaskCreate, TaskRunRequest, WorkflowShare, WorkflowAudit, WorkflowUpdate, WorkflowOut
 from app.service.agent_service import agent_service
 
 
@@ -494,3 +496,52 @@ def admin_resource_summary(
     - 用于后台监控面板展示。
     """
     return ApiResponse(data=agent_service.admin_resource_summary(db, current_user))
+
+
+@router.get("/admin/workflows", summary="管理员获取所有工作流列表")
+def admin_list_all_workflows(
+    status: Optional[str] = Query(None, description="状态过滤"),
+    db: Session = Depends(get_db_session),
+    admin: User = Depends(admin_required)
+):
+    """管理员获取所有工作流列表"""
+    workflows = db.query(AgentWorkflow).order_by(AgentWorkflow.created_at.desc())
+    if status:
+        workflows = workflows.filter(AgentWorkflow.audit_status == status)
+    return ApiResponse(data=[WorkflowOut.from_attributes(item) for item in workflows.all()])
+
+
+@router.post("/admin/workflows/{workflow_id}/audit", summary="管理员审核工作流")
+def audit_workflow(
+    workflow_id: int,
+    audit_in: WorkflowAudit,
+    db: Session = Depends(get_db_session),
+    admin: User = Depends(admin_required)
+):
+    """管理员审核工作流 (通过、驳回、分类、打标签、推荐)"""
+    workflow = agent_service.audit_workflow(db, workflow_id, audit_in, admin.id)
+    return ApiResponse(message="审核操作成功", data=WorkflowOut.from_attributes(workflow))
+
+
+@router.post("/admin/workflows/{workflow_id}/take-down", summary="管理员下架工作流")
+def take_down_workflow(
+    workflow_id: int,
+    reason: str = Body(..., embed=True),
+    db: Session = Depends(get_db_session),
+    admin: User = Depends(admin_required)
+):
+    """管理员下架工作流"""
+    workflow = agent_service.take_down_workflow(db, workflow_id, admin.id, reason)
+    return ApiResponse(message="工作流已下架", data=WorkflowOut.from_attributes(workflow))
+
+
+@router.put("/admin/workflows/{workflow_id}", summary="管理员修改工作流信息")
+def update_workflow_admin(
+    workflow_id: int,
+    workflow_in: WorkflowUpdate,
+    db: Session = Depends(get_db_session),
+    admin: User = Depends(admin_required)
+):
+    """管理员修改工作流信息 (分类、标签等)"""
+    workflow = agent_service.update_workflow_admin(db, workflow_id, workflow_in)
+    return ApiResponse(message="更新成功", data=WorkflowOut.from_attributes(workflow))

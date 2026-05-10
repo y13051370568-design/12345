@@ -35,7 +35,12 @@ class DatasetService:
     @staticmethod
     def get_dataset_by_id(db: Session, dataset_id: int) -> Optional[Dataset]:
         """通过ID获取数据集"""
-        return db.query(Dataset).filter(Dataset.id == dataset_id).first()
+        dataset = db.query(Dataset).filter(Dataset.id == dataset_id).first()
+        if dataset:
+            dataset.view_count += 1
+            db.commit()
+            db.refresh(dataset)
+        return dataset
 
     @staticmethod
     def list_datasets(
