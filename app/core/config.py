@@ -37,6 +37,9 @@ class Settings(BaseSettings):
     AGENT_LLM_MODEL: str = "deepseek-chat"
     AGENT_LLM_API_KEY_FILE: str = "config/api_key.txt"
     AGENT_LLM_TIMEOUT_SECONDS: int = 60
+    AGENT_WEB_SEARCH_ENABLED: bool = True
+    AGENT_WEB_SEARCH_MAX_RESULTS: int = 3
+    AGENT_WEB_SEARCH_TIMEOUT_SECONDS: int = 8
 
     # 日志配置
     LOG_LEVEL: str = "INFO"

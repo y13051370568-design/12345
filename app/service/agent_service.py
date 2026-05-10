@@ -1,9 +1,13 @@
 from __future__ import annotations
 
+import ast
+from pathlib import Path
 from typing import Any, Dict, List, Optional
 
+import joblib
 from fastapi import UploadFile
 from sqlalchemy.orm import Session
+from sqlalchemy.orm.attributes import flag_modified
 
 from app.core.exceptions import AuthorizationException, DataValidationException, ResourceNotFoundException
 from app.models.agent import AgentDataset, AgentTask, AgentTaskReview, AgentWorkflow
@@ -134,6 +138,18 @@ class AgentService:
             raise ResourceNotFoundException("任务尚未生成报告")
         return read_json_artifact(report_path)
 
+    def get_report_markdown_path(self, db: Session, task_id: str, current_user: Any) -> Path:
+        # Markdown 报告作为可下载文件产物返回，便于用户离线查看和二次编辑。
+        task = self.get_task_by_public_id(db, task_id, current_user)
+        artifacts = self._artifacts(task)
+        markdown_path = artifacts.get("final_report_markdown")
+        if not markdown_path:
+            raise ResourceNotFoundException("任务尚未生成 Markdown 报告")
+        path = Path(str(markdown_path))
+        if not path.exists() or not path.is_file():
+            raise ResourceNotFoundException("Markdown 报告文件不存在或已被清理")
+        return path
+
     def get_code(self, db: Session, task_id: str, current_user: Any) -> Dict[str, str]:
         # 代码查看属于开发者能力，避免普通用户误操作或看到过多实现细节。
         if current_user.role not in {"DEVELOPER", "ADMIN"}:
@@ -145,24 +161,90 @@ class AgentService:
             raise ResourceNotFoundException("任务尚未生成代码")
         return {"path": code_path, "python_code": read_text_artifact(code_path)}
 
+    def update_code(self, db: Session, task_id: str, payload: Any, current_user: Any) -> Dict[str, str]:
+        # 保存开发者修改后的 Python 代码；先做语法校验，再记录版本和审核历史。
+        if current_user.role not in {"DEVELOPER", "ADMIN"}:
+            raise AuthorizationException("只有开发者或管理员可以修改代码")
+        task = self.get_task_by_public_id(db, task_id, current_user)
+        python_code = payload.python_code
+        try:
+            ast.parse(python_code)
+        except SyntaxError as exc:
+            line = exc.lineno or 0
+            offset = exc.offset or 0
+            raise DataValidationException(f"Python 语法错误：第 {line} 行第 {offset} 列，{exc.msg}")
+
+        artifacts = self._artifacts(task)
+        previous_path = artifacts.get("generated_code") or task.generated_code_path
+        if previous_path:
+            code_path = Path(str(previous_path))
+        else:
+            code_path = Path("uploads/agent/artifacts") / task_id / "generated_model.py"
+        code_path.parent.mkdir(parents=True, exist_ok=True)
+        before_version = task.version
+        after_version = before_version + 1
+        versioned_path = code_path.with_name(f"{code_path.stem}_v{after_version}{code_path.suffix or '.py'}")
+        versioned_path.write_text(python_code, encoding="utf-8")
+
+        state = dict(task.state_json or {})
+        state_artifacts = state.setdefault("artifacts", {})
+        state_context = state.setdefault("context", {})
+        state_context_artifacts = state_context.setdefault("artifacts", {})
+        state_artifacts["generated_code"] = str(versioned_path)
+        state_context_artifacts["generated_code"] = str(versioned_path)
+        task.generated_code_path = str(versioned_path)
+        task.version = after_version
+        task.state_json = state
+        flag_modified(task, "state_json")
+        db.add(
+            AgentTaskReview(
+                task_id=task.id,
+                operator_user_id=current_user.id,
+                review_stage="code_review",
+                action="save_code",
+                patch_json={
+                    "previous_code_path": str(previous_path) if previous_path else None,
+                    "new_code_path": str(versioned_path),
+                    "python_code": python_code,
+                    "syntax_check": "passed",
+                },
+                comment=payload.comment or "保存代码修改",
+                before_version=before_version,
+                after_version=after_version,
+            )
+        )
+        db.commit()
+        db.refresh(task)
+        return {"path": str(versioned_path), "python_code": read_text_artifact(str(versioned_path))}
+
     def predict(self, db: Session, task_id: str, features: List[Dict[str, Any]], current_user: Any) -> Dict[str, Any]:
-        # 轻量级 Web Demo 实现：执行生成代码中的 train()，再用提交的多条特征做批量预测。
+        # 轻量级 Web Demo 实现：优先加载训练阶段持久化的模型产物，避免每次预测重复训练。
         task = self.get_task_by_public_id(db, task_id, current_user)
         if task.status != "COMPLETED":
             raise DataValidationException("任务尚未完成，不能进行预测")
         rows = features
         if any(not row for row in rows):
             raise DataValidationException("预测输入数组中的每一行都必须是非空样本对象")
-        code_info = self.get_code(db, task_id, current_user if current_user.role in {"DEVELOPER", "ADMIN"} else self._as_developer(current_user))
-        namespace: Dict[str, Any] = {}
-        exec(code_info["python_code"], namespace)
-        train_func = namespace.get("train")
-        if not callable(train_func):
-            raise DataValidationException("生成代码中缺少 train() 函数，无法执行预测")
-        model, _, _ = train_func()
         import pandas as pd
 
+        artifacts = self._artifacts(task)
+        model_path = task.model_artifact_path or artifacts.get("model_artifact")
+        if not model_path:
+            raise ResourceNotFoundException("模型文件尚未生成，请先完成训练任务")
+        artifact_path = Path(str(model_path))
+        if not artifact_path.exists() or not artifact_path.is_file():
+            raise ResourceNotFoundException("模型文件不存在或已被清理，请重新运行任务生成模型")
+        model_bundle = joblib.load(artifact_path)
+        model = model_bundle.get("model") if isinstance(model_bundle, dict) else model_bundle
+        feature_columns = model_bundle.get("feature_columns") if isinstance(model_bundle, dict) else task.feature_columns_json
+        if not hasattr(model, "predict"):
+            raise DataValidationException("模型文件格式不正确，无法执行预测")
         frame = pd.DataFrame(rows)
+        if feature_columns:
+            missing_columns = [column for column in feature_columns if column not in frame.columns]
+            if missing_columns:
+                raise DataValidationException(f"预测输入缺少特征列：{', '.join(missing_columns)}")
+            frame = frame[feature_columns]
         prediction = model.predict(frame)
         values = prediction.tolist() if hasattr(prediction, "tolist") else list(prediction)
         records = [
@@ -324,6 +406,7 @@ class AgentService:
             "result_demo_url": task.result_demo_url,
             "report_url": task.report_url,
             "generated_code_path": task.generated_code_path or (artifacts or {}).get("generated_code"),
+            "model_artifact_path": task.model_artifact_path or (artifacts or {}).get("model_artifact"),
             "fail_reason": task.fail_reason,
             "created_at": task.created_at,
             "updated_at": task.updated_at,
