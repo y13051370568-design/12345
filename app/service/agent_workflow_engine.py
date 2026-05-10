@@ -15,6 +15,7 @@ from sqlalchemy.orm.attributes import flag_modified
 from app.core.exceptions import DataValidationException
 from app.models.agent import AgentDataset, AgentModel, AgentTask, AgentTaskReview
 from app.service.agent_llm_client import AgentLLMClient
+from app.service.agent_web_search_client import AgentWebSearchClient
 
 
 # 后端内置工作流主链路，避免运行时依赖 backend/base 之外的草案代码。
@@ -77,6 +78,7 @@ class AgentWorkflowEngine:
         self.current_user = current_user
         self.offline = offline
         self.llm_client = None if offline else AgentLLMClient()
+        self.web_search_client = None if offline else AgentWebSearchClient()
 
     def create_task(self, dataset: AgentDataset, user_request: str, hitl_config: Dict[str, bool]) -> WorkflowResult:
         # 创建任务时只写入初始状态，真正的节点执行由 run/resume 接口触发。
@@ -304,6 +306,7 @@ CSV 列名：
         row_count = int(data_analysis.get("row_count") or 0)
         allowed_models = self._allowed_models(task.task_type or "REGRESSION")
         default_metric = "accuracy" if task.task_type == "CLASSIFICATION" else "r2_score"
+        external_references = self._collect_external_references(task, data_analysis)
         if self.llm_client:
             plan = self.llm_client.chat_json(
                 system_prompt="你是 AI4ML 平台的 Model Agent。请根据任务类型和数据概况规划可执行的 sklearn 表格建模方案，只返回 JSON。",
@@ -316,6 +319,9 @@ CSV 列名：
 
 可选模型只能从以下列表选择：
 {json.dumps(allowed_models, ensure_ascii=False)}
+
+联网搜索到的相似建模经验，仅作为参考，不能直接复制代码：
+{json.dumps(external_references, ensure_ascii=False, indent=2)}
 
 请返回严格 JSON：
 {{
@@ -342,16 +348,34 @@ CSV 列名：
                 "reason": "根据任务类型选择轻量可解释基线模型和随机森林模型进行对比。",
             }
         output = self._normalize_model_plan(plan, task.task_type or "REGRESSION", allowed_models)
+        output["external_references"] = external_references
         self._record_node_output(task, "model_plan", output)
 
+    def _collect_external_references(self, task: AgentTask, data_analysis: Dict[str, Any]) -> List[Dict[str, str]]:
+        # 联网搜索是模型规划增强能力：保存来源标题、链接和摘要，失败时返回空列表。
+        if not self.web_search_client:
+            return []
+        references = self.web_search_client.search_model_references(
+            task_description=task.task_description,
+            task_type=task.task_type,
+            target_column=task.target_column,
+            feature_columns=task.feature_columns_json or data_analysis.get("feature_columns") or [],
+        )
+        state = self._state(task)
+        state.setdefault("context", {})["external_references"] = references
+        task.state_json = state
+        flag_modified(task, "state_json")
+        return references
+
     def _model_training(self, task: AgentTask) -> None:
-        # 训练多个候选模型并选择最佳结果，只记录可审计摘要，不持久化 pickle。
+        # 训练多个候选模型并选择最佳结果，并将最终可预测 Pipeline 持久化到任务产物目录。
         state = self._state(task)
         frame = self._load_frame(state)
         target = task.target_column
         if not target or target not in frame.columns:
             raise DataValidationException("目标列不存在，无法训练")
 
+        import joblib
         from sklearn.compose import ColumnTransformer
         from sklearn.ensemble import RandomForestClassifier, RandomForestRegressor
         from sklearn.impute import SimpleImputer
@@ -368,12 +392,16 @@ CSV 列名：
         y = frame[target]
         numeric_features = list(x.select_dtypes(include="number").columns)
         categorical_features = [column for column in features if column not in numeric_features]
-        preprocess = ColumnTransformer(
-            transformers=[
-                ("num", Pipeline([("imputer", SimpleImputer(strategy="median")), ("scaler", StandardScaler())]), numeric_features),
-                ("cat", Pipeline([("imputer", SimpleImputer(strategy="most_frequent")), ("onehot", OneHotEncoder(handle_unknown="ignore"))]), categorical_features),
-            ]
-        )
+
+        def build_preprocess() -> ColumnTransformer:
+            # 每个候选模型使用独立预处理器，避免 Pipeline 训练状态互相污染。
+            return ColumnTransformer(
+                transformers=[
+                    ("num", Pipeline([("imputer", SimpleImputer(strategy="median")), ("scaler", StandardScaler())]), numeric_features),
+                    ("cat", Pipeline([("imputer", SimpleImputer(strategy="most_frequent")), ("onehot", OneHotEncoder(handle_unknown="ignore"))]), categorical_features),
+                ]
+            )
+
         random_state = int(plan.get("random_state", 42))
         estimators = {
             "LinearRegression": LinearRegression(),
@@ -401,7 +429,7 @@ CSV 列名：
             test_rows = int(len(x_test))
             for model_name in candidate_names:
                 try:
-                    pipeline = Pipeline([("preprocess", preprocess), ("model", estimators[model_name])])
+                    pipeline = Pipeline([("preprocess", build_preprocess()), ("model", estimators[model_name])])
                     pipeline.fit(x_train, y_train)
                     prediction = pipeline.predict(x_test)
                     metrics = self._evaluate_predictions(task.task_type or "REGRESSION", y_test, prediction)
@@ -421,7 +449,7 @@ CSV 列名：
         else:
             for model_name in candidate_names:
                 try:
-                    pipeline = Pipeline([("preprocess", preprocess), ("model", estimators[model_name])])
+                    pipeline = Pipeline([("preprocess", build_preprocess()), ("model", estimators[model_name])])
                     pipeline.fit(x, y)
                     summary = {"model_name": model_name, "metrics": {}}
                 except Exception as exc:
@@ -438,6 +466,20 @@ CSV 列名：
             "test_rows": test_rows,
             **best_model.get("metrics", {}),
         }
+        best_model_name = best_model.get("model_name")
+        final_pipeline = Pipeline([("preprocess", build_preprocess()), ("model", estimators[best_model_name])])
+        final_pipeline.fit(x, y)
+        model_path = self._task_artifact_dir(task) / "model.joblib"
+        joblib.dump(
+            {
+                "model": final_pipeline,
+                "feature_columns": features,
+                "target_column": target,
+                "task_type": task.task_type,
+                "best_model": best_model_name,
+            },
+            model_path,
+        )
         feature_importance = self._feature_importance(frame, target, features)
         output = {
             "metrics": metrics,
@@ -446,10 +488,16 @@ CSV 列名：
             "model_plan": plan,
             "feature_columns": features,
             "feature_importance": feature_importance,
+            "model_artifact": str(model_path),
         }
         task.feature_columns_json = features
+        task.model_artifact_path = str(model_path)
+        artifacts = state.setdefault("artifacts", {})
+        artifacts["model_artifact"] = str(model_path)
+        task.state_json = state
+        flag_modified(task, "state_json")
         self._record_node_output(task, "model_training", output)
-        self._upsert_agent_model(task, metrics)
+        self._upsert_agent_model(task, metrics, str(model_path))
 
     def _code_generation(self, task: AgentTask) -> None:
         # 生成可独立运行的训练代码，预测接口会调用其中的 train()。
@@ -475,6 +523,7 @@ CSV 列名：
         # 汇总前面节点的结构化输出；真实 LLM 模式下生成面向用户的解释和建议。
         state = self._state(task)
         report_path = self._task_artifact_dir(task) / "final_report.json"
+        markdown_path = self._task_artifact_dir(task) / "final_report.md"
         node_outputs = state.get("context", {}).get("node_outputs", {})
         summary = "Agent 已完成数据分析、模型规划、训练评估、代码生成和报告汇总。"
         recommendations = []
@@ -520,18 +569,90 @@ CSV 列名：
             "model_plan": node_outputs.get("model_plan", {}),
             "model_training": node_outputs.get("model_training", {}),
             "data_analysis": node_outputs.get("data_analysis", {}),
+            "external_references": state.get("context", {}).get("external_references", []),
             "summary": summary,
             "recommendations": recommendations,
             "risk_notes": risk_notes,
         }
         report_path.write_text(json.dumps(report, ensure_ascii=False, indent=2), encoding="utf-8")
+        markdown_path.write_text(self._render_markdown_report(report), encoding="utf-8")
         task.report_url = str(report_path)
         artifacts = state.setdefault("artifacts", {})
         artifacts["final_report"] = str(report_path)
+        artifacts["final_report_markdown"] = str(markdown_path)
         task.result_demo_url = f"/api/agent/tasks/{state['task_id']}/predict"
         task.state_json = state
         flag_modified(task, "state_json")
-        self._record_node_output(task, "operation_report", {"final_report": str(report_path)})
+        self._record_node_output(task, "operation_report", {"final_report": str(report_path), "final_report_markdown": str(markdown_path)})
+
+    def _render_markdown_report(self, report: Dict[str, Any]) -> str:
+        # 将结构化报告转换为适合下载和二次编辑的 Markdown 文本。
+        metrics = report.get("metrics") or {}
+        model_plan = report.get("model_plan") or {}
+        model_training = report.get("model_training") or {}
+        data_analysis = report.get("data_analysis") or {}
+        external_references = report.get("external_references") or model_plan.get("external_references") or []
+        feature_importance = model_training.get("feature_importance") or report.get("feature_importance") or []
+        candidate_models = model_training.get("candidate_models") or []
+        lines = [
+            f"# AI4ML 模型报告 - {report.get('task_id') or ''}".strip(),
+            "",
+            "## 核心观点",
+            report.get("summary") or "暂无摘要。",
+            "",
+            "## 任务信息",
+            f"- 任务描述：{report.get('task_description') or '-'}",
+            f"- 任务类型：{report.get('task_type') or '-'}",
+            f"- 目标列：{report.get('target_column') or '-'}",
+            f"- 特征列：{', '.join(report.get('feature_columns') or []) or '-'}",
+            "",
+            "## 训练指标",
+        ]
+        if metrics:
+            lines.extend([f"- {key}：{value}" for key, value in metrics.items()])
+        else:
+            lines.append("- 暂无训练指标。")
+        lines.extend(["", "## 候选模型"])
+        if candidate_models:
+            for item in candidate_models:
+                item_metrics = item.get("metrics") or {}
+                metric_text = "，".join(f"{key}={value}" for key, value in item_metrics.items()) or "暂无指标"
+                lines.append(f"- {item.get('model_name') or '-'}：{metric_text}")
+        else:
+            lines.append("- 暂无候选模型信息。")
+        lines.extend(["", "## 特征重要性"])
+        if feature_importance:
+            lines.extend(["| 特征 | 影响强度 | 方向 |", "| --- | ---: | --- |"])
+            for item in feature_importance:
+                direction = "正相关" if item.get("direction") == "positive" else "负相关"
+                lines.append(f"| {item.get('feature') or '-'} | {item.get('importance') or 0} | {direction} |")
+        else:
+            lines.append("- 暂无特征重要性信息。")
+        lines.extend(["", "## 数据分析"])
+        lines.append(f"- 行数：{data_analysis.get('row_count') or '-'}")
+        lines.append(f"- 列数：{data_analysis.get('column_count') or '-'}")
+        if data_analysis.get("selection_reason"):
+            lines.append(f"- 选列说明：{data_analysis.get('selection_reason')}")
+        lines.extend(["", "## 模型规划"])
+        lines.append(f"- 主指标：{model_plan.get('primary_metric') or model_plan.get('metric') or '-'}")
+        lines.append(f"- 候选模型：{', '.join(model_plan.get('candidate_models') or []) or '-'}")
+        lines.append(f"- 预处理策略：{model_plan.get('preprocess') or '-'}")
+        if model_plan.get("reason"):
+            lines.append(f"- 规划原因：{model_plan.get('reason')}")
+        lines.extend(["", "## 联网参考"])
+        if external_references:
+            for item in external_references:
+                lines.append(f"- [{item.get('title') or '参考资料'}]({item.get('url') or '#'})：{item.get('summary') or '-'}")
+        else:
+            lines.append("- 当前报告未使用联网参考。")
+        lines.extend(["", "## 使用建议"])
+        recommendations = report.get("recommendations") or []
+        lines.extend([f"- {item}" for item in recommendations] or ["- 暂无使用建议。"])
+        lines.extend(["", "## 风险提示"])
+        risk_notes = report.get("risk_notes") or []
+        lines.extend([f"- {item}" for item in risk_notes] or ["- 暂无风险提示。"])
+        lines.append("")
+        return "\n".join(lines)
 
     def _pause_for_review(self, task: AgentTask, review_stage: str, node: str) -> None:
         # 将节点输出转换为待审核内容，前端提交审核后再进入下一个节点。
@@ -808,11 +929,12 @@ def train():
     return pipeline, feature_columns, TARGET_COLUMN
 '''
 
-    def _upsert_agent_model(self, task: AgentTask, metrics: Dict[str, Any]) -> None:
+    def _upsert_agent_model(self, task: AgentTask, metrics: Dict[str, Any], model_artifact_path: str | None = None) -> None:
         # 训练完成后沉淀一条模型资源记录，后续可接入模型广场审核流程。
         existing = self.db.query(AgentModel).filter(AgentModel.task_id == task.id).first()
         if existing:
             existing.performance_metrics = metrics
+            existing.model_artifact_path = model_artifact_path
             self.db.commit()
             return
         model = AgentModel(
@@ -825,7 +947,7 @@ def train():
             feature_columns_json=task.feature_columns_json,
             framework="sklearn",
             performance_metrics=metrics,
-            model_artifact_path=None,
+            model_artifact_path=model_artifact_path,
             is_public=0,
             audit_status="PENDING",
             is_recommended=0,
