@@ -70,6 +70,7 @@ class TaskSummary(BaseModel):
     result_demo_url: Optional[str] = None
     report_url: Optional[str] = None
     generated_code_path: Optional[str] = None
+    model_artifact_path: Optional[str] = None
     fail_reason: Optional[str] = None
     created_at: datetime
     updated_at: datetime
@@ -113,6 +114,12 @@ class PredictRequest(BaseModel):
         min_length=1,
         description="批量预测输入，数组元素为样本对象，键为特征列名",
     )
+
+
+class CodeUpdateRequest(BaseModel):
+    # 开发者保存修改后的 Operation Agent 代码，后端会先做 Python 语法校验。
+    python_code: str = Field(..., min_length=1, description="修改后的完整 Python 代码")
+    comment: str = Field("", description="本次代码修改说明")
 
 
 class WorkflowOut(BaseModel):
