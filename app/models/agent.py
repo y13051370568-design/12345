@@ -117,6 +117,15 @@ class AgentWorkflow(Base):
     applicable_task_types = Column(String(100))
     code_content = Column(LONGTEXT, nullable=False)
     fork_from_id = Column(BigInteger)
+    
+    category = Column(String(50))
+    tags = Column(String(255))
+    view_count = Column(Integer, default=0)
+    fork_count = Column(Integer, default=0)
+    is_recommended = Column(TINYINT, default=0)
+    rejection_reason = Column(String(255))
+    
     is_public = Column(TINYINT, nullable=False, default=0)
     audit_status = Column(String(20), nullable=False, default="PENDING")
     created_at = Column(DateTime, nullable=False, default=datetime.utcnow)
+    updated_at = Column(DateTime, nullable=False, default=datetime.utcnow, onupdate=datetime.utcnow)

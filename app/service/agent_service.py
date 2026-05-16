@@ -11,6 +11,7 @@ from sqlalchemy.orm.attributes import flag_modified
 
 from app.core.exceptions import AuthorizationException, DataValidationException, ResourceNotFoundException
 from app.models.agent import AgentDataset, AgentTask, AgentTaskReview, AgentWorkflow
+from app.models.audit_log import AuditLog
 from app.service.agent_storage import make_task_zip, read_json_artifact, read_text_artifact, save_csv_upload
 from app.service.agent_workflow_engine import AgentWorkflowEngine, parse_hitl_config
 
@@ -278,6 +279,8 @@ class AgentService:
             task_id=task.id,
             title=payload.title,
             description=payload.description,
+            category=payload.category,
+            tags=payload.tags,
             workflow_spec_json=state,
             default_config_json=(state.get("context") or {}).get("hitl_config"),
             prompt_template_json=None,
@@ -298,12 +301,20 @@ class AgentService:
         if not source:
             raise ResourceNotFoundException("工作流不存在")
         if not source.is_public and source.user_id != current_user.id and current_user.role != "ADMIN":
+            if source.audit_status != "APPROVED":
+                raise AuthorizationException("该工作流未通过审核，不能 Fork")
             raise AuthorizationException("该工作流未公开，不能 Fork")
+        
+        # 增加 Fork 计数
+        source.fork_count += 1
+        
         forked = AgentWorkflow(
             user_id=current_user.id,
             task_id=source.task_id,
             title=f"{source.title} Fork",
             description=source.description,
+            category=source.category,
+            tags=source.tags,
             workflow_spec_json=source.workflow_spec_json,
             default_config_json=source.default_config_json,
             prompt_template_json=source.prompt_template_json,
@@ -365,6 +376,79 @@ class AgentService:
             "datasets": db.query(AgentDataset).count(),
             "workflows": db.query(AgentWorkflow).count(),
         }
+
+    def audit_workflow(self, db: Session, workflow_id: int, audit_in: Any, admin_id: int) -> AgentWorkflow:
+        """管理员审核工作流"""
+        workflow = db.query(AgentWorkflow).filter(AgentWorkflow.id == workflow_id).first()
+        if not workflow:
+            raise ResourceNotFoundException("工作流不存在")
+        
+        old_status = workflow.audit_status
+        workflow.audit_status = audit_in.audit_status
+        if audit_in.rejection_reason:
+            workflow.rejection_reason = audit_in.rejection_reason
+        if audit_in.category:
+            workflow.category = audit_in.category
+        if audit_in.tags:
+            workflow.tags = audit_in.tags
+        if audit_in.is_recommended is not None:
+            workflow.is_recommended = audit_in.is_recommended
+            
+        action = "audit_workflow"
+        if audit_in.audit_status == "APPROVED":
+            action = "approve_workflow"
+            workflow.is_public = 1  # 审核通过默认公开
+        elif audit_in.audit_status == "REJECTED":
+            action = "reject_workflow"
+            
+        audit_log = AuditLog(
+            resource_type="workflow",
+            resource_id=workflow_id,
+            admin_id=admin_id,
+            old_status=None,  # String status doesn't fit Integer old_status well, but we use it for logging
+            new_status=None,
+            action=action,
+            reason=audit_in.rejection_reason
+        )
+        db.add(audit_log)
+        db.commit()
+        db.refresh(workflow)
+        return workflow
+
+    def take_down_workflow(self, db: Session, workflow_id: int, admin_id: int, reason: str) -> AgentWorkflow:
+        """工作流下架"""
+        workflow = db.query(AgentWorkflow).filter(AgentWorkflow.id == workflow_id).first()
+        if not workflow:
+            raise ResourceNotFoundException("工作流不存在")
+            
+        workflow.is_public = 0
+        workflow.audit_status = "OFF_SHELF"
+        
+        audit_log = AuditLog(
+            resource_type="workflow",
+            resource_id=workflow_id,
+            admin_id=admin_id,
+            action="take_down_workflow",
+            reason=reason
+        )
+        db.add(audit_log)
+        db.commit()
+        db.refresh(workflow)
+        return workflow
+
+    def update_workflow_admin(self, db: Session, workflow_id: int, workflow_in: Any) -> AgentWorkflow:
+        """管理员更新工作流信息"""
+        workflow = db.query(AgentWorkflow).filter(AgentWorkflow.id == workflow_id).first()
+        if not workflow:
+            raise ResourceNotFoundException("工作流不存在")
+        
+        update_data = workflow_in.model_dump(exclude_unset=True)
+        for field, value in update_data.items():
+            setattr(workflow, field, value)
+            
+        db.commit()
+        db.refresh(workflow)
+        return workflow
 
     def _assert_owner_or_admin(self, owner_id: int, current_user: Any) -> None:
         # 所有私有 Agent 资源默认只允许所有者本人或管理员访问。

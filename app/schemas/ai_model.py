@@ -33,6 +33,7 @@ class ModelOut(AIModelBase):
     user_id: int
     status: int
     is_recommended: bool
+    view_count: int
     rejection_reason: Optional[str] = None
     created_at: datetime
     updated_at: datetime

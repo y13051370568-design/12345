@@ -18,6 +18,8 @@ class Dataset(Base):
     
     is_public = Column(Boolean, default=False)
     
+    view_count = Column(Integer, default=0)
+    
     rejection_reason = Column(String(255))
     file_url = Column(String(255))
     file_size = Column(BigInteger)  # in bytes
