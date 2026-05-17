@@ -272,8 +272,12 @@ class AgentService:
         if current_user.role not in {"DEVELOPER", "ADMIN"}:
             raise AuthorizationException("只有开发者或管理员可以分享工作流")
         task = self.get_task_by_public_id(db, payload.task_id, current_user)
+        if task.status != "COMPLETED":
+            raise AuthorizationException("只有已完成的 Agent 任务可以分享为工作流")
         code = self.get_code(db, payload.task_id, current_user)["python_code"]
         state = task.state_json or {}
+        workflow_spec = self._build_workflow_spec(task, state)
+        default_config = self._build_workflow_default_config(task, state)
         workflow = AgentWorkflow(
             user_id=current_user.id,
             task_id=task.id,
@@ -281,8 +285,8 @@ class AgentService:
             description=payload.description,
             category=payload.category,
             tags=payload.tags,
-            workflow_spec_json=state,
-            default_config_json=(state.get("context") or {}).get("hitl_config"),
+            workflow_spec_json=workflow_spec,
+            default_config_json=default_config,
             prompt_template_json=None,
             applicable_task_types=payload.applicable_task_types or task.task_type,
             code_content=code,
@@ -300,10 +304,11 @@ class AgentService:
         source = db.query(AgentWorkflow).filter(AgentWorkflow.id == workflow_id).first()
         if not source:
             raise ResourceNotFoundException("工作流不存在")
-        if not source.is_public and source.user_id != current_user.id and current_user.role != "ADMIN":
-            if source.audit_status != "APPROVED":
-                raise AuthorizationException("该工作流未通过审核，不能 Fork")
-            raise AuthorizationException("该工作流未公开，不能 Fork")
+        if source.audit_status == "OFF_SHELF":
+            raise AuthorizationException("该工作流已下架，不能 Fork")
+        if source.user_id != current_user.id and current_user.role != "ADMIN":
+            if source.audit_status != "APPROVED" or not source.is_public:
+                raise AuthorizationException("只能 Fork 已审核公开的工作流")
         
         # 增加 Fork 计数
         source.fork_count += 1
@@ -329,12 +334,99 @@ class AgentService:
         db.refresh(forked)
         return forked
 
-    def list_workflows(self, db: Session, current_user: Any) -> List[AgentWorkflow]:
+    def list_workflows(
+        self,
+        db: Session,
+        current_user: Any,
+        *,
+        category: str | None = None,
+        task_type: str | None = None,
+        tag: str | None = None,
+        status: str | None = None,
+        scope: str = "visible",
+        sort: str = "latest",
+        page: int = 1,
+        page_size: int = 20,
+    ) -> Dict[str, Any]:
         # 普通用户可见公开工作流和自己的私有工作流；管理员可见全部。
-        query = db.query(AgentWorkflow).order_by(AgentWorkflow.created_at.desc())
-        if current_user.role != "ADMIN":
+        query = db.query(AgentWorkflow)
+        normalized_scope = (scope or "visible").lower()
+        if normalized_scope == "public":
+            query = query.filter(AgentWorkflow.is_public == 1, AgentWorkflow.audit_status == "APPROVED")
+        elif normalized_scope == "mine":
+            query = query.filter(AgentWorkflow.user_id == current_user.id)
+        elif current_user.role != "ADMIN":
             query = query.filter((AgentWorkflow.is_public == 1) | (AgentWorkflow.user_id == current_user.id))
-        return query.all()
+
+        if status:
+            query = query.filter(AgentWorkflow.audit_status == status)
+        elif normalized_scope == "visible" and current_user.role != "ADMIN":
+            query = query.filter(
+                (AgentWorkflow.audit_status == "APPROVED") | (AgentWorkflow.user_id == current_user.id)
+            )
+        if category:
+            query = query.filter(AgentWorkflow.category == category)
+        if task_type:
+            query = query.filter(AgentWorkflow.applicable_task_types.like(f"%{task_type}%"))
+        if tag:
+            query = query.filter(AgentWorkflow.tags.like(f"%{tag}%"))
+
+        total = query.count()
+        if sort == "hot":
+            query = query.order_by(AgentWorkflow.fork_count.desc(), AgentWorkflow.view_count.desc(), AgentWorkflow.created_at.desc())
+        else:
+            query = query.order_by(AgentWorkflow.created_at.desc())
+
+        safe_page = max(page, 1)
+        safe_page_size = min(max(page_size, 1), 100)
+        items = query.offset((safe_page - 1) * safe_page_size).limit(safe_page_size).all()
+        return {"items": items, "total": total, "page": safe_page, "page_size": safe_page_size}
+
+    def get_workflow(self, db: Session, workflow_id: int, current_user: Any, *, increase_view: bool = False) -> AgentWorkflow:
+        workflow = db.query(AgentWorkflow).filter(AgentWorkflow.id == workflow_id).first()
+        if not workflow:
+            raise ResourceNotFoundException("工作流不存在")
+        if current_user.role != "ADMIN" and workflow.user_id != current_user.id:
+            if workflow.audit_status != "APPROVED" or not workflow.is_public:
+                raise AuthorizationException("无权访问该工作流")
+        if increase_view and workflow.user_id != current_user.id:
+            workflow.view_count += 1
+            db.commit()
+            db.refresh(workflow)
+        return workflow
+
+    def _build_workflow_spec(self, task: AgentTask, state: Dict[str, Any]) -> Dict[str, Any]:
+        # 分享时只沉淀可复用工作流资产，不暴露数据库自增 ID 以外的敏感运行细节。
+        context = state.get("context") or {}
+        node_outputs = context.get("node_outputs") or {}
+        artifacts = state.get("artifacts") or {}
+        return {
+            "source_task_id": state.get("task_id") or str(task.id),
+            "task_type": task.task_type,
+            "target_column": task.target_column,
+            "node_outputs": node_outputs,
+            "artifacts": artifacts,
+            "feature_columns": (
+                node_outputs.get("data_analysis", {}).get("feature_columns")
+                or node_outputs.get("model_training", {}).get("feature_columns")
+                or []
+            ),
+            "model_plan": node_outputs.get("model_plan", {}),
+            "model_training": node_outputs.get("model_training", {}),
+            "code_generation": node_outputs.get("code_generation", {}),
+        }
+
+    def _build_workflow_default_config(self, task: AgentTask, state: Dict[str, Any]) -> Dict[str, Any]:
+        context = state.get("context") or {}
+        node_outputs = context.get("node_outputs") or {}
+        return {
+            "hitl_config": context.get("hitl_config") or {},
+            "task_type": task.task_type,
+            "target_column": task.target_column,
+            "data_analysis": node_outputs.get("data_analysis", {}),
+            "model_plan": node_outputs.get("model_plan", {}),
+            "training_metrics": node_outputs.get("model_training", {}).get("metrics", {}),
+        }
 
     def admin_list_tasks(self, db: Session, current_user: Any) -> List[AgentTask]:
         # 管理员查看全量 Agent 任务，用于后台监控和排障。
