@@ -342,6 +342,15 @@ class AgentService:
             raise AuthorizationException("只有管理员可以查看全部 Agent 任务")
         return db.query(AgentTask).order_by(AgentTask.created_at.desc()).all()
 
+    def admin_list_workflows(self, db: Session, current_user: Any, status: Optional[str] = None) -> List[AgentWorkflow]:
+        """管理员查看全部工作流，支持按审核状态筛选"""
+        if current_user.role != "ADMIN":
+            raise AuthorizationException("只有管理员可以查看全部工作流")
+        query = db.query(AgentWorkflow).order_by(AgentWorkflow.created_at.desc())
+        if status:
+            query = query.filter(AgentWorkflow.audit_status == status)
+        return query.all()
+
     def admin_task_logs(self, db: Session, task_id: str, current_user: Any) -> Dict[str, Any]:
         # 任务日志由状态快照、错误信息和审核历史组合而成，满足一期可观测性需求。
         if current_user.role != "ADMIN":
@@ -382,7 +391,10 @@ class AgentService:
         workflow = db.query(AgentWorkflow).filter(AgentWorkflow.id == workflow_id).first()
         if not workflow:
             raise ResourceNotFoundException("工作流不存在")
-        
+
+        if workflow.audit_status != "PENDING":
+            raise DataValidationException(f"该工作流已被审核（当前状态: {workflow.audit_status}），无法重复审核")
+
         old_status = workflow.audit_status
         workflow.audit_status = audit_in.audit_status
         if audit_in.rejection_reason:
@@ -393,22 +405,22 @@ class AgentService:
             workflow.tags = audit_in.tags
         if audit_in.is_recommended is not None:
             workflow.is_recommended = audit_in.is_recommended
-            
+
         action = "audit_workflow"
         if audit_in.audit_status == "APPROVED":
             action = "approve_workflow"
             workflow.is_public = 1  # 审核通过默认公开
         elif audit_in.audit_status == "REJECTED":
             action = "reject_workflow"
-            
+
         audit_log = AuditLog(
             resource_type="workflow",
             resource_id=workflow_id,
             admin_id=admin_id,
-            old_status=None,  # String status doesn't fit Integer old_status well, but we use it for logging
-            new_status=None,
+            old_status=old_status,
+            new_status=workflow.audit_status,
             action=action,
-            reason=audit_in.rejection_reason
+            reason=audit_in.rejection_reason,
         )
         db.add(audit_log)
         db.commit()
@@ -420,16 +432,22 @@ class AgentService:
         workflow = db.query(AgentWorkflow).filter(AgentWorkflow.id == workflow_id).first()
         if not workflow:
             raise ResourceNotFoundException("工作流不存在")
-            
+
+        if workflow.audit_status == "TAKEN_DOWN":
+            raise DataValidationException("该工作流已被下架")
+
+        old_status = workflow.audit_status
         workflow.is_public = 0
-        workflow.audit_status = "OFF_SHELF"
-        
+        workflow.audit_status = "TAKEN_DOWN"
+
         audit_log = AuditLog(
             resource_type="workflow",
             resource_id=workflow_id,
             admin_id=admin_id,
+            old_status=old_status,
+            new_status="TAKEN_DOWN",
             action="take_down_workflow",
-            reason=reason
+            reason=reason,
         )
         db.add(audit_log)
         db.commit()

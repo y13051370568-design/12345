@@ -4,9 +4,10 @@ from fastapi import APIRouter, Body, Depends, File, Query, UploadFile
 from fastapi.responses import FileResponse
 from sqlalchemy.orm import Session
 
-from app.core.auth import get_current_user, admin_required
+from app.core.auth import get_current_user, admin_required, require_roles
+
+developer_required = require_roles(["DEVELOPER", "ADMIN"])
 from app.db import get_db_session
-from app.models.agent import AgentWorkflow
 from app.models.user import User
 from app.schemas.agent import ApiResponse, CodeUpdateRequest, PredictRequest, ReviewSubmit, TaskCreate, TaskRunRequest, WorkflowShare, WorkflowAudit, WorkflowUpdate, WorkflowOut
 from app.service.agent_service import agent_service
@@ -392,7 +393,7 @@ def predict(
 def share_workflow(
     payload: WorkflowShare,
     db: Session = Depends(get_db_session),
-    current_user=Depends(get_current_user),
+    current_user=Depends(developer_required),
 ):
     """
     将已完成任务沉淀为可复用工作流并提交审核。
@@ -506,11 +507,9 @@ def admin_list_all_workflows(
     db: Session = Depends(get_db_session),
     admin: User = Depends(admin_required)
 ):
-    """管理员获取所有工作流列表"""
-    workflows = db.query(AgentWorkflow).order_by(AgentWorkflow.created_at.desc())
-    if status:
-        workflows = workflows.filter(AgentWorkflow.audit_status == status)
-    return ApiResponse(data=[WorkflowOut.from_attributes(item) for item in workflows.all()])
+    """管理员获取所有工作流列表，支持按审核状态筛选"""
+    workflows = agent_service.admin_list_workflows(db, admin, status=status)
+    return ApiResponse(data=[WorkflowOut.from_attributes(item) for item in workflows])
 
 
 @router.post("/admin/workflows/{workflow_id}/audit", summary="管理员审核工作流")

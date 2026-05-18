@@ -118,7 +118,7 @@ class WorkflowUpdate(BaseModel):
 
 
 class WorkflowAudit(BaseModel):
-    audit_status: str  # APPROVED, REJECTED
+    audit_status: str  # PENDING, APPROVED, REJECTED, TAKEN_DOWN
     rejection_reason: Optional[str] = None
     category: Optional[str] = None
     tags: Optional[str] = None
