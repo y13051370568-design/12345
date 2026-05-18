@@ -31,11 +31,11 @@ def list_resources(
     # 根据类型转换 items 为对应的 Schema
     items = data["items"]
     if type.upper() == "DATASET":
-        data["items"] = [DatasetOut.from_attributes(item) for item in items]
+        data["items"] = [DatasetOut.model_validate(item) for item in items]
     elif type.upper() == "MODEL":
-        data["items"] = [ModelOut.from_attributes(item) for item in items]
+        data["items"] = [ModelOut.model_validate(item) for item in items]
     elif type.upper() == "WORKFLOW":
-        data["items"] = [WorkflowOut.from_attributes(item) for item in items]
+        data["items"] = [WorkflowOut.model_validate(item) for item in items]
         
     return ApiResponse(data=data)
 
@@ -51,11 +51,11 @@ def get_resource_detail(
     resource = community_service.get_resource_detail(db, type.upper(), resource_id)
     
     if type.upper() == "DATASET":
-        return ApiResponse(data=DatasetOut.from_attributes(resource))
+        return ApiResponse(data=DatasetOut.model_validate(resource))
     elif type.upper() == "MODEL":
-        return ApiResponse(data=ModelOut.from_attributes(resource))
+        return ApiResponse(data=ModelOut.model_validate(resource))
     elif type.upper() == "WORKFLOW":
-        return ApiResponse(data=WorkflowOut.from_attributes(resource))
+        return ApiResponse(data=WorkflowOut.model_validate(resource))
     
     return ApiResponse(data=resource)
 
@@ -69,7 +69,7 @@ def add_comment(
     对社区资源进行评分和文字评论。
     """
     comment = community_service.add_comment(db, comment_in, current_user.id)
-    return ApiResponse(message="评论发表成功", data=CommentOut.from_attributes(comment))
+    return ApiResponse(message="评论发表成功", data=CommentOut.model_validate(comment))
 
 @router.get("/comments", summary="获取资源评论列表")
 def list_comments(

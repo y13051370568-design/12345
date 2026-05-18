@@ -342,14 +342,20 @@ class AgentService:
             raise AuthorizationException("只有管理员可以查看全部 Agent 任务")
         return db.query(AgentTask).order_by(AgentTask.created_at.desc()).all()
 
-    def admin_list_workflows(self, db: Session, current_user: Any, status: Optional[str] = None) -> List[AgentWorkflow]:
-        """管理员查看全部工作流，支持按审核状态筛选"""
+    def admin_list_workflows(
+        self, db: Session, current_user: Any,
+        status: Optional[str] = None,
+        page: int = 1, page_size: int = 10,
+    ) -> tuple[int, List[AgentWorkflow]]:
+        """管理员查看全部工作流，支持按审核状态筛选和分页"""
         if current_user.role != "ADMIN":
             raise AuthorizationException("只有管理员可以查看全部工作流")
         query = db.query(AgentWorkflow).order_by(AgentWorkflow.created_at.desc())
         if status:
             query = query.filter(AgentWorkflow.audit_status == status)
-        return query.all()
+        total = query.count()
+        items = query.offset((page - 1) * page_size).limit(page_size).all()
+        return total, items
 
     def admin_task_logs(self, db: Session, task_id: str, current_user: Any) -> Dict[str, Any]:
         # 任务日志由状态快照、错误信息和审核历史组合而成，满足一期可观测性需求。

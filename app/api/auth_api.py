@@ -42,7 +42,7 @@ def register(
         role=user_data.role
     )
 
-    return UserOut.from_orm(user)
+    return UserOut.model_validate(user)
 
 
 @router.post("/login", summary="用户登录")
