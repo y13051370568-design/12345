@@ -17,18 +17,32 @@ class AgentLLMClient:
         self.base_url = config["base_url"].rstrip("/")
         self.api_key = config["api_key"]
         self.model = config["model"]
+        self.last_usage: Dict[str, Any] = {}
 
     def chat_json(self, system_prompt: str, user_prompt: str) -> Dict[str, Any]:
+        # 保留旧调用方接口，只返回模型生成的 JSON 内容。
+        return self.chat_json_with_usage(system_prompt, user_prompt)["content"]
+
+    def chat_json_with_usage(self, system_prompt: str, user_prompt: str) -> Dict[str, Any]:
         # 要求模型返回严格 JSON；若返回 Markdown 代码块则做兼容剥离。
-        raw_text = self.chat_text(system_prompt=system_prompt, user_prompt=user_prompt, temperature=0.1).strip()
+        response = self.chat_text_with_usage(
+            system_prompt=system_prompt,
+            user_prompt=user_prompt,
+            temperature=0.1,
+        )
+        raw_text = response["content"].strip()
         if raw_text.startswith("```"):
             raw_text = raw_text.removeprefix("```json").removeprefix("```").removesuffix("```").strip()
         try:
-            return json.loads(raw_text)
+            return {"content": json.loads(raw_text), "usage": response.get("usage") or {}}
         except json.JSONDecodeError as exc:
             raise DataValidationException("真实 LLM 未返回合法 JSON", {"raw_text": raw_text, "error": str(exc)})
 
     def chat_text(self, system_prompt: str, user_prompt: str, temperature: float = 0.3) -> str:
+        # 保留旧调用方接口，只返回文本内容。
+        return self.chat_text_with_usage(system_prompt, user_prompt, temperature)["content"]
+
+    def chat_text_with_usage(self, system_prompt: str, user_prompt: str, temperature: float = 0.3) -> Dict[str, Any]:
         # 使用 OpenAI-compatible Chat Completions 协议，兼容 DeepSeek 等平台。
         try:
             with httpx.Client(timeout=settings.AGENT_LLM_TIMEOUT_SECONDS) as client:
@@ -49,9 +63,18 @@ class AgentLLMClient:
                 )
                 response.raise_for_status()
                 payload = response.json()
-                return payload["choices"][0]["message"]["content"]
+                usage = payload.get("usage") or {}
+                self.last_usage = usage
+                return {
+                    "content": payload["choices"][0]["message"]["content"],
+                    "usage": usage,
+                    "raw": payload,
+                }
         except httpx.HTTPStatusError as exc:
-            raise DataValidationException("真实 LLM 调用返回错误状态", {"status_code": exc.response.status_code, "body": exc.response.text[:1000]})
+            raise DataValidationException(
+                "真实 LLM 调用返回错误状态",
+                {"status_code": exc.response.status_code, "body": exc.response.text[:1000]},
+            )
         except Exception as exc:
             raise DataValidationException("真实 LLM 调用失败", {"error": str(exc)})
 

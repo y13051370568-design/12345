@@ -13,10 +13,11 @@ import pandas as pd
 from sqlalchemy.orm import Session
 from sqlalchemy.orm.attributes import flag_modified
 
-from app.core.exceptions import DataValidationException
+from app.core.exceptions import DataValidationException, QuotaExceededException
 from app.models.agent import AgentDataset, AgentModel, AgentTask, AgentTaskReview
 from app.service.agent_llm_client import AgentLLMClient
 from app.service.agent_web_search_client import AgentWebSearchClient
+from app.service.quota_service import quota_service
 
 
 # 后端内置工作流主链路，避免运行时依赖 backend/base 之外的草案代码。
@@ -249,6 +250,48 @@ class AgentWorkflowEngine:
         }
         handlers[node](task)
 
+    def _chat_json_for_node(self, task: AgentTask, node: str, system_prompt: str, user_prompt: str) -> Dict[str, Any]:
+        # 真实 LLM 的 token 用量以 API 返回的 usage.total_tokens 为准，并按节点记录到额度日志。
+        if not self.llm_client:
+            raise DataValidationException("离线模式不能调用真实 LLM")
+        quota_check = quota_service.check_quota(self.db, self.current_user.id, required_tokens=1)
+        if not quota_check["allowed"]:
+            raise QuotaExceededException(quota_check["message"])
+
+        response = self.llm_client.chat_json_with_usage(system_prompt=system_prompt, user_prompt=user_prompt)
+        usage = self._normalize_llm_usage(response.get("usage") or {}, system_prompt, user_prompt, response.get("content"))
+        tokens = int(usage.get("total_tokens") or 0)
+        if tokens > 0:
+            quota_service.consume_quota(
+                self.db,
+                self.current_user.id,
+                tokens=tokens,
+                action=f"agent_llm_{node}",
+                task_id=self._state(task).get("task_id"),
+            )
+        return {"content": response["content"], "usage": usage}
+
+    def _normalize_llm_usage(
+        self,
+        usage: Dict[str, Any],
+        system_prompt: str,
+        user_prompt: str,
+        content: Any,
+    ) -> Dict[str, Any]:
+        # OpenAI/DeepSeek 兼容接口通常返回 total_tokens；缺失时用字符数做兜底，避免出现免费调用。
+        normalized = dict(usage or {})
+        total_tokens = normalized.get("total_tokens")
+        try:
+            total_tokens = int(total_tokens)
+        except (TypeError, ValueError):
+            total_tokens = 0
+        if total_tokens <= 0:
+            text = system_prompt + "\n" + user_prompt + "\n" + json.dumps(content, ensure_ascii=False)
+            total_tokens = max(1, math.ceil(len(text) / 4))
+            normalized["estimated"] = True
+        normalized["total_tokens"] = total_tokens
+        return normalized
+
     def _manager_parse(self, task: AgentTask) -> None:
         # 解析自然语言需求；offline=false 时必须调用真实 LLM。
         state = self._state(task)
@@ -256,7 +299,9 @@ class AgentWorkflowEngine:
         columns = [str(column) for column in frame.columns]
         request = task.task_description or ""
         if self.llm_client:
-            parsed = self.llm_client.chat_json(
+            llm_response = self._chat_json_for_node(
+                task,
+                "manager_parse",
                 system_prompt="你是 AI4ML 平台的 Manager Agent。请把用户自然语言需求解析成稳定的结构化建模意图，只返回 JSON。",
                 user_prompt=f"""
 用户需求：
@@ -276,6 +321,8 @@ CSV 列名：
 }}
 """.strip(),
             )
+            parsed = llm_response["content"]
+            llm_usage = llm_response["usage"]
             target_column = self._validate_target_column(parsed.get("target_column"), columns)
             task_type = self._normalize_task_type(parsed.get("task_type"), frame[target_column])
             llm_output = parsed
@@ -283,6 +330,7 @@ CSV 列名：
             target_column = self._infer_target_column(request, columns)
             task_type = self._infer_task_type(frame[target_column])
             llm_output = None
+            llm_usage = None
         feature_columns = [column for column in columns if column != target_column]
         task.task_type = task_type
         task.target_column = target_column
@@ -294,6 +342,7 @@ CSV 列名：
             "reason": (llm_output or {}).get("reason", "根据用户描述和 CSV 列结构自动推断"),
             "llm_used": self.llm_client is not None,
             "llm_output": llm_output,
+            "llm_usage": llm_usage,
         }
         self._record_node_output(task, "manager_parse", output)
 
@@ -311,7 +360,9 @@ CSV 列名：
             "sample_rows": json.loads(frame.head(5).to_json(orient="records", force_ascii=False)),
         }
         if self.llm_client:
-            selection = self.llm_client.chat_json(
+            llm_response = self._chat_json_for_node(
+                task,
+                "data_analysis",
                 system_prompt="你是 AI4ML 平台的 Data Agent。请根据任务意图和数据概况复核目标列与候选特征列，只返回 JSON。",
                 user_prompt=f"""
 任务解析：
@@ -328,6 +379,7 @@ CSV 列名：
 }}
 """.strip(),
             )
+            selection = llm_response["content"]
             target_column = self._validate_target_column(selection.get("target_column"), columns)
             feature_columns = self._validate_feature_columns(selection.get("candidate_feature_columns"), columns, target_column)
             task.target_column = target_column
@@ -337,6 +389,7 @@ CSV 列名：
             output["selection_reason"] = selection.get("selection_reason", "")
             output["llm_used"] = True
             output["llm_output"] = selection
+            output["llm_usage"] = llm_response["usage"]
         self._record_node_output(task, "data_analysis", output)
 
     def _model_plan(self, task: AgentTask) -> None:
@@ -348,7 +401,9 @@ CSV 列名：
         default_metric = "accuracy" if task.task_type == "CLASSIFICATION" else "r2_score"
         external_references = self._collect_external_references(task, data_analysis)
         if self.llm_client:
-            plan = self.llm_client.chat_json(
+            llm_response = self._chat_json_for_node(
+                task,
+                "model_plan",
                 system_prompt="你是 AI4ML 平台的 Model Agent。请根据任务类型和数据概况规划可执行的 sklearn 表格建模方案，只返回 JSON。",
                 user_prompt=f"""
 任务解析：
@@ -376,6 +431,8 @@ CSV 列名：
 }}
 """.strip(),
             )
+            plan = llm_response["content"]
+            llm_usage = llm_response["usage"]
         else:
             plan = {
                 "framework": "sklearn",
@@ -387,8 +444,10 @@ CSV 列名：
                 "preprocess": "数值特征填充中位数并标准化，类别特征填充众数并做 OneHot 编码",
                 "reason": "根据任务类型选择轻量可解释基线模型和随机森林模型进行对比。",
             }
+            llm_usage = None
         output = self._normalize_model_plan(plan, task.task_type or "REGRESSION", allowed_models)
         output["external_references"] = external_references
+        output["llm_usage"] = llm_usage
         self._record_node_output(task, "model_plan", output)
 
     def _collect_external_references(self, task: AgentTask, data_analysis: Dict[str, Any]) -> List[Dict[str, str]]:
@@ -568,7 +627,9 @@ CSV 列名：
         summary = "Agent 已完成数据分析、模型规划、训练评估、代码生成和报告汇总。"
         recommendations = []
         if self.llm_client:
-            report_text = self.llm_client.chat_json(
+            llm_response = self._chat_json_for_node(
+                task,
+                "operation_report",
                 system_prompt="你是 AI4ML 平台的 Operation Agent。请把建模工作流结果解释给非专业用户，只返回 JSON。",
                 user_prompt=f"""
 用户需求：
@@ -594,10 +655,13 @@ CSV 列名：
 }}
 """.strip(),
             )
+            report_text = llm_response["content"]
+            llm_usage = llm_response["usage"]
             summary = str(report_text.get("summary") or summary)
             recommendations = report_text.get("recommendations") if isinstance(report_text.get("recommendations"), list) else []
             risk_notes = report_text.get("risk_notes") if isinstance(report_text.get("risk_notes"), list) else []
         else:
+            llm_usage = None
             risk_notes = ["离线模式使用规则化摘要，未调用真实 LLM 解释结果。"]
         report = {
             "task_id": state.get("task_id"),
@@ -613,6 +677,7 @@ CSV 列名：
             "summary": summary,
             "recommendations": recommendations,
             "risk_notes": risk_notes,
+            "llm_usage": llm_usage,
         }
         report_path.write_text(json.dumps(report, ensure_ascii=False, indent=2), encoding="utf-8")
         markdown_path.write_text(self._render_markdown_report(report), encoding="utf-8")
@@ -623,7 +688,7 @@ CSV 列名：
         task.result_demo_url = f"/api/agent/tasks/{state['task_id']}/predict"
         task.state_json = state
         flag_modified(task, "state_json")
-        self._record_node_output(task, "operation_report", {"final_report": str(report_path), "final_report_markdown": str(markdown_path)})
+        self._record_node_output(task, "operation_report", {"final_report": str(report_path), "final_report_markdown": str(markdown_path), "llm_usage": llm_usage})
 
     def _render_markdown_report(self, report: Dict[str, Any]) -> str:
         # 将结构化报告转换为适合下载和二次编辑的 Markdown 文本。
