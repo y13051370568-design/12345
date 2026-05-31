@@ -39,7 +39,13 @@ def save_csv_upload(file: UploadFile, user_id: int) -> Dict[str, Any]:
         raise FileUploadException(f"文件大小超过 {settings.MAX_UPLOAD_SIZE_MB}MB 限制")
 
     try:
-        frame = pd.read_csv(target_path)
+        try:
+            frame = pd.read_csv(target_path)
+        except UnicodeDecodeError:
+            try:
+                frame = pd.read_csv(target_path, encoding="gbk")
+            except UnicodeDecodeError:
+                frame = pd.read_csv(target_path, encoding="gb18030")
     except Exception as exc:
         target_path.unlink(missing_ok=True)
         raise DataValidationException("CSV 文件解析失败，请检查编码、分隔符和表头", {"error": str(exc)})

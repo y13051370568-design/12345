@@ -14,6 +14,7 @@ from app.models.agent import AgentDataset, AgentTask, AgentTaskReview, AgentWork
 from app.models.audit_log import AuditLog
 from app.service.agent_storage import make_task_zip, read_json_artifact, read_text_artifact, save_csv_upload
 from app.service.agent_workflow_engine import AgentWorkflowEngine, parse_hitl_config
+from app.service.quota_service import quota_service
 
 
 class AgentService:
@@ -83,6 +84,11 @@ class AgentService:
     def run_task(self, db: Session, task_id: str, current_user: Any, offline: bool = True) -> AgentTask:
         # 执行可能在任意节点暂停、完成或失败，最终状态统一从数据库重新读取。
         task = self.get_task_by_public_id(db, task_id, current_user)
+        if not offline:
+            quota_check = quota_service.check_quota(db, current_user.id, required_tokens=1)
+            if not quota_check["allowed"]:
+                from app.core.exceptions import QuotaExceededException
+                raise QuotaExceededException(quota_check["message"])
         AgentWorkflowEngine(db, current_user, offline=offline).run_task(task)
         return self.get_task_by_public_id(db, task_id, current_user)
 
@@ -570,6 +576,12 @@ class AgentService:
         # 所有私有 Agent 资源默认只允许所有者本人或管理员访问。
         if current_user.role != "ADMIN" and owner_id != current_user.id:
             raise AuthorizationException("只能访问自己的 Agent 资源")
+
+    def _assert_can_view(self, owner_id: int, is_public: int, current_user: Any) -> None:
+        # 公开资源所有登录用户可查看，私有资源仅限所有者/管理员。
+        if is_public == 1:
+            return
+        self._assert_owner_or_admin(owner_id, current_user)
 
     def _artifacts(self, task: AgentTask) -> Dict[str, Any]:
         # artifacts 是后端内置工作流产物的统一索引，例如代码、报告、Demo URL。

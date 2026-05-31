@@ -1,4 +1,5 @@
 from typing import Optional
+from pathlib import Path
 
 from fastapi import APIRouter, Body, Depends, File, Query, UploadFile
 from fastapi.responses import FileResponse
@@ -68,8 +69,34 @@ def get_dataset_preview(
         from app.core.exceptions import ResourceNotFoundException
 
         raise ResourceNotFoundException("数据集不存在")
-    agent_service._assert_owner_or_admin(record.user_id, current_user)
+    agent_service._assert_can_view(record.user_id, record.is_public, current_user)
     return ApiResponse(data=record.preview_json)
+
+
+@router.get("/datasets/{dataset_id}/download", summary="下载 Agent 数据集 CSV")
+def download_dataset(
+    dataset_id: int,
+    db: Session = Depends(get_db_session),
+    current_user=Depends(get_current_user),
+):
+    """
+    下载 Agent 数据集的原始 CSV 文件。
+
+    - 公开数据集所有登录用户可下载。
+    - 私有数据集仅限所有者和管理员下载。
+    """
+    from app.models.agent import AgentDataset
+    from app.core.exceptions import ResourceNotFoundException
+
+    record = db.query(AgentDataset).filter(AgentDataset.id == dataset_id).first()
+    if not record:
+        raise ResourceNotFoundException("数据集不存在")
+    agent_service._assert_can_view(record.user_id, record.is_public, current_user)
+
+    path = Path(record.file_path)
+    if not path.exists():
+        raise ResourceNotFoundException("数据集文件不存在或已被清理")
+    return FileResponse(path, filename=record.name, media_type="text/csv; charset=utf-8")
 
 
 @router.post("/tasks", summary="创建 Agent 建模任务")

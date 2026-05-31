@@ -55,7 +55,10 @@ class CommunityService:
             else:
                 query = query.order_by(desc(model_class.view_count))
         elif sort_by == "recommended":
-            query = query.order_by(desc(model_class.is_recommended), desc(model_class.created_at))
+            if hasattr(model_class, "is_recommended"):
+                query = query.order_by(desc(model_class.is_recommended), desc(model_class.created_at))
+            else:
+                query = query.order_by(desc(model_class.created_at))
         else:
             query = query.order_by(desc(model_class.created_at))
 
