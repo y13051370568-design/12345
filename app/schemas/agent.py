@@ -144,6 +144,7 @@ class WorkflowOut(BaseModel):
     # 工作流列表返回可复用、可 Fork 的元信息。
     id: int
     task_id: int
+    user_id: int
     title: str
     description: Optional[str] = None
     category: Optional[str] = None
@@ -161,3 +162,11 @@ class WorkflowOut(BaseModel):
 
     class Config:
         from_attributes = True
+
+
+class WorkflowDetailOut(WorkflowOut):
+    # 工作流详情会返回可复用配置和代码内容，供开发者 Fork 后继续二次开发。
+    workflow_spec_json: Optional[Dict[str, Any]] = None
+    default_config_json: Optional[Dict[str, Any]] = None
+    prompt_template_json: Optional[Dict[str, Any]] = None
+    code_content: str

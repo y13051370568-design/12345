@@ -9,7 +9,7 @@ from app.core.auth import get_current_user, admin_required, require_roles
 developer_required = require_roles(["DEVELOPER", "ADMIN"])
 from app.db import get_db_session
 from app.models.user import User
-from app.schemas.agent import ApiResponse, CodeUpdateRequest, PredictRequest, ReviewSubmit, TaskCreate, TaskRunRequest, WorkflowShare, WorkflowAudit, WorkflowUpdate, WorkflowOut
+from app.schemas.agent import ApiResponse, CodeUpdateRequest, PredictRequest, ReviewSubmit, TaskCreate, TaskRunRequest, WorkflowShare, WorkflowAudit, WorkflowUpdate, WorkflowOut, WorkflowDetailOut
 from app.service.agent_service import agent_service
 
 
@@ -425,6 +425,14 @@ def fork_workflow(
 
 @router.get("/workflows", summary="查询 Agent 工作流列表")
 def list_workflows(
+    category: str | None = None,
+    task_type: str | None = None,
+    tag: str | None = None,
+    status: str | None = None,
+    scope: str = "visible",
+    sort: str = "latest",
+    page: int = 1,
+    page_size: int = 20,
     db: Session = Depends(get_db_session),
     current_user=Depends(get_current_user),
 ):
@@ -435,23 +443,43 @@ def list_workflows(
     - 管理员可以查看全部工作流。
     - 返回标题、描述、适用任务类型、审核状态和 Fork 来源。
     """
-    workflows = agent_service.list_workflows(db, current_user)
-    return ApiResponse(
-        data=[
-            {
-                "id": item.id,
-                "task_id": item.task_id,
-                "title": item.title,
-                "description": item.description,
-                "applicable_task_types": item.applicable_task_types,
-                "fork_from_id": item.fork_from_id,
-                "is_public": item.is_public,
-                "audit_status": item.audit_status,
-                "created_at": item.created_at,
-            }
-            for item in workflows
-        ]
+    result = agent_service.list_workflows(
+        db,
+        current_user,
+        category=category,
+        task_type=task_type,
+        tag=tag,
+        status=status,
+        scope=scope,
+        sort=sort,
+        page=page,
+        page_size=page_size,
     )
+    return ApiResponse(
+        data={
+            "items": [WorkflowOut.from_attributes(item) for item in result["items"]],
+            "total": result["total"],
+            "page": result["page"],
+            "page_size": result["page_size"],
+        }
+    )
+
+
+@router.get("/workflows/{workflow_id}", summary="查询 Agent 工作流详情")
+def get_workflow_detail(
+    workflow_id: int,
+    db: Session = Depends(get_db_session),
+    current_user=Depends(get_current_user),
+):
+    """
+    查询单个工作流的可复用配置和代码内容。
+
+    - 公开且审核通过的工作流所有登录用户可访问。
+    - 私有或待审核工作流仅所有者本人和管理员可访问。
+    - 详情接口会返回 `workflow_spec_json`、`default_config_json` 和 `code_content`。
+    """
+    workflow = agent_service.get_workflow(db, workflow_id, current_user, increase_view=True)
+    return ApiResponse(data=WorkflowDetailOut.from_attributes(workflow))
 
 
 @router.get("/admin/tasks", summary="管理员查询全部 Agent 任务")
