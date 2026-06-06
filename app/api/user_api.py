@@ -38,7 +38,7 @@ def get_users(
     total, users = get_user_list(db, page, page_size, role, status, username)
     return {
         "total": total,
-        "list": [UserOut.from_orm(u) for u in users]
+        "list": [UserOut.model_validate(u) for u in users]
     }
 
 

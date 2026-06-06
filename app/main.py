@@ -26,6 +26,7 @@ from app.api import quota_api
 from app.api import dataset_api
 from app.api import agent_api
 from app.api import community_api
+from app.api import developer_api
 
 
 # 创建FastAPI应用实例
@@ -83,6 +84,8 @@ app.include_router(quota_api.router, prefix="/api", tags=["API 额度管理"])
 app.include_router(dataset_api.router, prefix="/api", tags=["数据中心审核与管理"])
 app.include_router(agent_api.router, prefix="/api", tags=["Agent 工作流"])
 app.include_router(community_api.router, prefix="/api", tags=["社区资源与互动"])
+app.include_router(developer_api.router, prefix="/api", tags=["开发者申请"])
+app.include_router(developer_api.admin_router, prefix="/api", tags=["管理员-开发者申请审核"])
 
 
 # 健康检查接口

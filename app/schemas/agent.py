@@ -118,7 +118,7 @@ class WorkflowUpdate(BaseModel):
 
 
 class WorkflowAudit(BaseModel):
-    audit_status: str  # APPROVED, REJECTED
+    audit_status: str  # PENDING, APPROVED, REJECTED, TAKEN_DOWN
     rejection_reason: Optional[str] = None
     category: Optional[str] = None
     tags: Optional[str] = None
@@ -151,14 +151,14 @@ class WorkflowOut(BaseModel):
     tags: Optional[str] = None
     applicable_task_types: Optional[str] = None
     fork_from_id: Optional[int] = None
-    view_count: int
-    fork_count: int
-    is_recommended: int
-    is_public: int
-    audit_status: str
+    view_count: int = 0
+    fork_count: int = 0
+    is_recommended: int = 0
+    is_public: int = 0
+    audit_status: str = "PENDING"
     rejection_reason: Optional[str] = None
-    created_at: datetime
-    updated_at: datetime
+    created_at: Optional[datetime] = None
+    updated_at: Optional[datetime] = None
 
     class Config:
         from_attributes = True
