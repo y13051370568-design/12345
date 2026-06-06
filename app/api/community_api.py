@@ -1,17 +1,45 @@
+from pathlib import Path
+
+import pandas as pd
 from fastapi import APIRouter, Depends, Query, Body, HTTPException
+from fastapi.responses import FileResponse, RedirectResponse
 from sqlalchemy.orm import Session
 from typing import List, Optional, Any, Dict
 
 from app.db import get_db_session
+from app.models.dataset import Dataset
 from app.schemas.comment import CommentCreate, CommentOut
 from app.schemas.dataset import DatasetOut
 from app.schemas.ai_model import ModelOut
 from app.schemas.agent import WorkflowOut, ApiResponse
 from app.service.community_service import community_service
+from app.service.agent_storage import read_csv_with_fallback
 from app.core.auth import get_current_user
 from app.models.user import User
 
 router = APIRouter(prefix="/community", tags=["社区资源与互动"])
+
+
+def _get_public_dataset(db: Session, dataset_id: int) -> Dataset:
+    dataset = db.query(Dataset).filter(Dataset.id == dataset_id).first()
+    if not dataset:
+        raise HTTPException(status_code=404, detail="数据集不存在")
+    if dataset.status != 1 or not dataset.is_public:
+        raise HTTPException(status_code=403, detail="该数据集尚未公开")
+    return dataset
+
+
+def _resolve_local_dataset_path(file_url: str | None) -> Path | None:
+    raw = str(file_url or "").strip()
+    if not raw or raw.lower().startswith(("http://", "https://")):
+        return None
+    path = Path(raw)
+    if path.exists() and path.is_file():
+        return path
+    relative = Path.cwd() / raw
+    if relative.exists() and relative.is_file():
+        return relative
+    return None
 
 @router.get("/resources", summary="检索社区资源 (数据集/模型/工作流)")
 def list_resources(
@@ -58,6 +86,52 @@ def get_resource_detail(
         return ApiResponse(data=WorkflowOut.model_validate(resource))
     
     return ApiResponse(data=resource)
+
+
+@router.get("/datasets/{dataset_id}/preview", summary="预览公开社区数据集")
+def preview_public_dataset(
+    dataset_id: int,
+    db: Session = Depends(get_db_session),
+):
+    """
+    预览已审核通过且公开的数据集，不走 Agent 私有数据集权限。
+    """
+    dataset = _get_public_dataset(db, dataset_id)
+    path = _resolve_local_dataset_path(dataset.file_url)
+    if not path:
+        raise HTTPException(status_code=400, detail="当前数据集不是后端本地 CSV 文件，无法在线预览")
+    try:
+        frame = read_csv_with_fallback(path)
+    except Exception as exc:
+        raise HTTPException(status_code=400, detail=f"CSV 预览解析失败：{exc}") from exc
+    return ApiResponse(
+        data={
+            "columns": [str(column) for column in frame.columns],
+            "rows": frame.head(20).where(pd.notnull(frame), None).to_dict(orient="records"),
+            "row_count": int(len(frame)),
+            "file_size": path.stat().st_size,
+        }
+    )
+
+
+@router.get("/datasets/{dataset_id}/download", summary="下载公开社区数据集")
+def download_public_dataset(
+    dataset_id: int,
+    db: Session = Depends(get_db_session),
+):
+    """
+    下载已审核通过且公开的数据集。本地文件直接返回，HTTP 地址跳转。
+    """
+    dataset = _get_public_dataset(db, dataset_id)
+    file_url = str(dataset.file_url or "").strip()
+    if not file_url:
+        raise HTTPException(status_code=404, detail="当前数据集未配置可下载文件")
+    if file_url.lower().startswith(("http://", "https://")):
+        return RedirectResponse(file_url)
+    path = _resolve_local_dataset_path(file_url)
+    if not path:
+        raise HTTPException(status_code=404, detail="数据集文件不存在")
+    return FileResponse(path, filename=path.name, media_type="text/csv")
 
 @router.post("/comments", response_model=ApiResponse, summary="发表评论与评分")
 def add_comment(

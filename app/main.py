@@ -27,6 +27,8 @@ from app.api import dataset_api
 from app.api import agent_api
 from app.api import community_api
 from app.api import developer_api
+from app.db import Base, engine
+from app.models import agent, ai_model, audit_log, comment, dataset, developer_application, quota_log, user  # noqa: F401
 
 
 # 创建FastAPI应用实例
@@ -86,6 +88,12 @@ app.include_router(agent_api.router, prefix="/api", tags=["Agent 工作流"])
 app.include_router(community_api.router, prefix="/api", tags=["社区资源与互动"])
 app.include_router(developer_api.router, prefix="/api", tags=["开发者申请"])
 app.include_router(developer_api.admin_router, prefix="/api", tags=["管理员-开发者申请审核"])
+
+
+@app.on_event("startup")
+def ensure_runtime_tables():
+    # 非破坏性创建缺失表，避免旧库缺 quota_logs 等新增表导致额度页面为空或扣费事务失败。
+    Base.metadata.create_all(bind=engine)
 
 
 # 健康检查接口

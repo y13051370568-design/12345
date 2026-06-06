@@ -15,6 +15,23 @@ from app.core.exceptions import DataValidationException, FileUploadException, Re
 
 UPLOAD_DIR = Path("uploads/agent/datasets")
 DOWNLOAD_DIR = Path("uploads/agent/downloads")
+CSV_ENCODINGS = ("utf-8-sig", "utf-8", "gb18030", "gbk")
+
+
+def read_csv_with_fallback(path: str | Path) -> pd.DataFrame:
+    # 兼容中文表头常见的 UTF-8 BOM、UTF-8、GB18030/GBK 编码。
+    last_error: Exception | None = None
+    for encoding in CSV_ENCODINGS:
+        try:
+            return pd.read_csv(path, encoding=encoding)
+        except UnicodeDecodeError as exc:
+            last_error = exc
+    try:
+        return pd.read_csv(path)
+    except Exception as exc:
+        if last_error:
+            raise last_error
+        raise exc
 
 
 def save_csv_upload(file: UploadFile, user_id: int) -> Dict[str, Any]:
@@ -39,7 +56,7 @@ def save_csv_upload(file: UploadFile, user_id: int) -> Dict[str, Any]:
         raise FileUploadException(f"文件大小超过 {settings.MAX_UPLOAD_SIZE_MB}MB 限制")
 
     try:
-        frame = pd.read_csv(target_path)
+        frame = read_csv_with_fallback(target_path)
     except Exception as exc:
         target_path.unlink(missing_ok=True)
         raise DataValidationException("CSV 文件解析失败，请检查编码、分隔符和表头", {"error": str(exc)})

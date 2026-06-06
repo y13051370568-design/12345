@@ -17,6 +17,7 @@ from app.core.exceptions import DataValidationException, QuotaExceededException
 from app.models.agent import AgentDataset, AgentModel, AgentTask, AgentTaskReview
 from app.service.agent_llm_client import AgentLLMClient
 from app.service.agent_web_search_client import AgentWebSearchClient
+from app.service.agent_storage import read_csv_with_fallback
 from app.service.quota_service import quota_service
 
 
@@ -180,6 +181,80 @@ class AgentWorkflowEngine:
 
     def _apply_review_patch(self, task: AgentTask, review_stage: str, patch: Dict[str, Any], after_version: int) -> None:
         # 不同审核节点可以把人工修改写回对应上下文；代码审核会保存开发者编辑后的 Python 代码。
+        state = self._state(task)
+        context = state.setdefault("context", {})
+        node_outputs = context.setdefault("node_outputs", {})
+
+        if review_stage == "parse_review":
+            frame = self._load_frame(state)
+            columns = [str(column) for column in frame.columns]
+            target_column = self._validate_target_column(
+                patch.get("target_column") or patch.get("target"),
+                columns,
+            )
+            feature_columns = self._validate_feature_columns(
+                patch.get("feature_columns") or patch.get("input_features"),
+                columns,
+                target_column,
+            )
+            task_type = self._normalize_task_type(patch.get("task_type"), frame[target_column])
+            task.target_column = target_column
+            task.feature_columns_json = feature_columns
+            task.task_type = task_type
+            output = dict(node_outputs.get("manager_parse", {}))
+            output.update(patch)
+            output.update(
+                {
+                    "task_type": task_type,
+                    "target_column": target_column,
+                    "target": target_column,
+                    "feature_columns": feature_columns,
+                    "input_features": feature_columns,
+                    "human_edited": True,
+                    "human_edit_version": after_version,
+                }
+            )
+            node_outputs["manager_parse"] = output
+            task.state_json = state
+            flag_modified(task, "state_json")
+            return
+
+        if review_stage == "feature_review":
+            output = dict(node_outputs.get("data_analysis", {}))
+            output.update(patch)
+            target_column = output.get("target_column") or task.target_column
+            if target_column:
+                output["target_column"] = target_column
+            feature_columns = patch.get("feature_columns") or patch.get("candidate_feature_columns") or task.feature_columns_json
+            if feature_columns:
+                frame = self._load_frame(state)
+                columns = [str(column) for column in frame.columns]
+                normalized_features = self._validate_feature_columns(feature_columns, columns, str(target_column or task.target_column))
+                output["feature_columns"] = normalized_features
+                output["candidate_feature_columns"] = normalized_features
+                task.feature_columns_json = normalized_features
+            output["human_edited"] = True
+            output["human_edit_version"] = after_version
+            node_outputs["data_analysis"] = output
+            task.state_json = state
+            flag_modified(task, "state_json")
+            return
+
+        if review_stage == "model_plan_review":
+            output = dict(node_outputs.get("model_plan", {}))
+            output.update(patch)
+            normalized = self._normalize_model_plan(
+                output,
+                task.task_type or "REGRESSION",
+                self._allowed_models(task.task_type or "REGRESSION"),
+            )
+            normalized["human_edited"] = True
+            normalized["human_edit_version"] = after_version
+            node_outputs["model_plan"] = normalized
+            task.state_json = state
+            flag_modified(task, "state_json")
+            return
+
         if review_stage != "code_review":
             return
         python_code = patch.get("python_code")
@@ -827,7 +902,7 @@ CSV 列名：
         csv_path = state.get("context", {}).get("csv_path")
         if not csv_path or not Path(csv_path).exists():
             raise DataValidationException("任务数据集文件不存在")
-        return pd.read_csv(csv_path)
+        return read_csv_with_fallback(csv_path)
 
     def _allowed_models(self, task_type: str) -> List[str]:
         # 限制 LLM 规划只能选择后端已经实现并测试过的 sklearn 模型。
@@ -1020,9 +1095,18 @@ FEATURE_COLUMNS = {feature_literal}
 MODEL_NAME = "{model_class}"
 
 
+def read_csv_with_fallback(path):
+    for encoding in ("utf-8-sig", "utf-8", "gb18030", "gbk"):
+        try:
+            return pd.read_csv(path, encoding=encoding)
+        except UnicodeDecodeError:
+            continue
+    return pd.read_csv(path)
+
+
 def train():
     # 训练入口供后端预测接口调用，返回模型、特征列和目标列。
-    frame = pd.read_csv(DATA_PATH)
+    frame = read_csv_with_fallback(DATA_PATH)
     feature_columns = [column for column in FEATURE_COLUMNS if column in frame.columns and column != TARGET_COLUMN]
     if not feature_columns:
         feature_columns = [column for column in frame.columns if column != TARGET_COLUMN]
