@@ -1,4 +1,5 @@
 from fastapi import APIRouter, Depends, UploadFile, File, HTTPException
+from fastapi.responses import FileResponse
 from sqlalchemy.orm import Session
 import os
 import uuid
@@ -56,7 +57,14 @@ async def upload_csv(
     with open(filepath, "wb") as f:
         f.write(content)
 
-    row_count = len(content.decode("utf-8").splitlines())
+    try:
+        text = content.decode("utf-8")
+    except UnicodeDecodeError:
+        try:
+            text = content.decode("gbk")
+        except UnicodeDecodeError:
+            text = content.decode("gb18030")
+    row_count = len(text.splitlines())
 
     if row_count > settings.MAX_ROWS_PER_CSV:
         os.remove(filepath)
@@ -81,6 +89,25 @@ async def upload_csv(
             "upload_time": datetime.now().isoformat()
         }
     }
+
+
+@router.get("/download/{file_id}")
+def download_csv(
+    file_id: str,
+    current_user = Depends(get_current_user),
+):
+    """
+    下载已上传的 CSV 文件
+
+    - **file_id**: 上传时返回的文件 ID
+    """
+    import glob
+    matches = glob.glob(os.path.join(UPLOAD_DIR, f"{file_id}_*"))
+    if not matches:
+        raise HTTPException(status_code=404, detail="文件不存在或已被清理")
+    filepath = matches[0]
+    filename = os.path.basename(filepath).split("_", 1)[1]
+    return FileResponse(filepath, filename=filename, media_type="text/csv; charset=utf-8")
 
 
 @router.get("/list")
